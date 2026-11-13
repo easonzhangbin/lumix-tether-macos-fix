@@ -23,6 +23,8 @@
  *
  * --self-test uses a fake environment: no signals, process enumeration,
  * IORegistry, ImageCaptureCore, or USB access occurs in that mode.
+ * Real inspection/restart has an 18-second process watchdog. Expiry exits
+ * this helper with status 124; it adds no signal to any other process.
  */
 #import <Foundation/Foundation.h>
 #import <IOKit/IOKitLib.h>
@@ -73,6 +75,7 @@ static const NSTimeInterval KillWait = 1.0;
 @property(nonatomic, copy) NSString *productName;
 @property(nonatomic) NSUInteger interfaceCount;
 @property(nonatomic) uint64_t interfaceID;
+@property(nonatomic) uint64_t usbLinkSpeed;
 @property(nonatomic, copy) NSString *ownerState; /* none, confirmed, unknown */
 @property(nonatomic, copy) NSString *ownerLabel;
 @property(nonatomic) pid_t ownerPID;
@@ -107,7 +110,8 @@ static const NSTimeInterval KillWait = 1.0;
              @"s1h_device_count": @([_deviceModelState isEqualToString:@"confirmed"] ? _deviceCount : 0),
              @"device_model_state": _deviceModelState, @"usb_product_name": _productName,
              @"s1h_interface_count": @(_interfaceCount),
-             @"interface_registry_id": @(_interfaceID), @"owner_state": _ownerState,
+             @"interface_registry_id": @(_interfaceID), @"usb_link_speed_bps": @(_usbLinkSpeed),
+             @"owner_state": _ownerState,
              @"interface_owner_label": _ownerLabel, @"owner_pid": @(_ownerPID),
              @"owner_process": _owner ? _owner.json : (id)NSNull.null,
              @"owner_identity_lookup_errno": @(_ownerLookupError),
@@ -281,6 +285,7 @@ static void inspect_registry(ServiceSnapshot *snapshot) {
             NSString *alternate = registry_string(device, CFSTR("kUSBProductString"));
             snapshot.productName = name.length ? name : alternate;
             snapshot.deviceModelState = product_model_state(name, alternate);
+            snapshot.usbLinkSpeed = registry_number(device, CFSTR("UsbLinkSpeed"), 0);
         }
         io_iterator_t entries = IO_OBJECT_NULL;
         kr = IORegistryEntryCreateIterator(device, kIOServicePlane, kIORegistryIterateRecursively, &entries);
@@ -440,7 +445,9 @@ static void inspect_processes(ServiceSnapshot *snapshot) {
 
 /* After a signal, the process may disappear before IORegistry removes its
  * old user-client node. This narrow state is observed only inside a bounded
- * wait. It never authorizes another signal, particularly KILL. */
+ * wait. The earlier process-inventory read may still contain that exact old
+ * identity; a different identity is never accepted. This state never
+ * authorizes another signal, particularly KILL. */
 static BOOL expected_shutdown_pending(ServiceSnapshot *s, ServiceIdentity *expected,
                                        uint64_t interfaceID) {
     return !s.inspectionError && s.knownApps.count == 0 &&
@@ -450,7 +457,9 @@ static BOOL expected_shutdown_pending(ServiceSnapshot *s, ServiceIdentity *expec
            s.interfaceID == interfaceID && [s.ownerState isEqualToString:@"confirmed"] &&
            s.ownerPID == expected.pid && s.creatorPIDs.count == 1 &&
            s.creatorPIDs.firstObject.intValue == expected.pid &&
-           !s.owner && s.ownerLookupError == ESRCH && s.daemons.count == 0 &&
+           !s.owner && s.ownerLookupError == ESRCH &&
+           (s.daemons.count == 0 ||
+            (s.daemons.count == 1 && [s.daemons.firstObject isSameProcess:expected])) &&
            s.otherPTPInterfaces.count == 0;
 }
 
@@ -512,6 +521,7 @@ static NSDictionary *restart_service(id<ServiceEnvironment> environment) {
 @property(nonatomic) BOOL cameraAppAfterTerm;
 @property(nonatomic) BOOL delayedRegistryRelease;
 @property(nonatomic) BOOL keepRegistryPending;
+@property(nonatomic) BOOL retainShutdownInventory;
 @property(nonatomic) NSUInteger signalCount;
 @property(nonatomic, strong) NSMutableArray<NSNumber *> *signalNumbers;
 @end
@@ -554,7 +564,9 @@ static NSDictionary *restart_service(id<ServiceEnvironment> environment) {
     if (_delayedRegistryRelease && signalNumber == SIGTERM) {
         _snapshot.owner = nil;
         _snapshot.ownerLookupError = ESRCH;
-        _snapshot.daemons = @[];
+        /* Process inventory and the final owner lookup are separate reads.
+         * Reproduce the inventory retaining the just-exited target. */
+        if (!_retainShutdownInventory) _snapshot.daemons = @[];
         _lookupIdentity = nil;
     }
     if (_releaseOnSignal == signalNumber) {
@@ -681,6 +693,19 @@ static int self_test(void) {
     e = fake_environment(); e.delayedRegistryRelease = YES;
     check([restart_service(e)[@"status"] isEqual:@"released"] && e.signalCount == 1 && e.clock >= 0.3,
           @"A dead target with a transient old registry owner waits for registry removal");
+    e = fake_environment(); e.delayedRegistryRelease = YES; e.retainShutdownInventory = YES;
+    check([restart_service(e)[@"status"] isEqual:@"released"] && e.signalCount == 1 && e.clock >= 0.3,
+          @"A cached inventory entry for the exited target only permits bounded waiting");
+    e = fake_environment();
+    ServiceIdentity *expected = e.snapshot.owner;
+    e.snapshot.owner = nil; e.snapshot.ownerLookupError = ESRCH;
+    ServiceIdentity *unexpected = fake_identity(); unexpected.pid += 1;
+    e.snapshot.daemons = @[unexpected];
+    check(!expected_shutdown_pending(e.snapshot, expected, e.snapshot.interfaceID),
+          @"A different daemon in the shutdown inventory cannot authorize waiting or signals");
+    unexpected.pid = expected.pid; unexpected.startMicroseconds += 1;
+    check(!expected_shutdown_pending(e.snapshot, expected, e.snapshot.interfaceID),
+          @"A reused PID in the shutdown inventory cannot authorize waiting or signals");
     e = fake_environment(); e.delayedRegistryRelease = YES; e.keepRegistryPending = YES;
     check([restart_service(e)[@"reason"] isEqual:@"shutdown_pending_registry_not_released"] && e.signalCount == 1 && e.clock >= TermWait,
           @"A dead target with persistent old registry owner times out without KILL");
@@ -719,6 +744,16 @@ int main(int argc, const char *argv[]) {
             return 2;
         }
         if (simulate) return self_test();
+        /* A rare blocked system inspection must not leave a supervisor
+         * waiting indefinitely. Only real modes reach this watchdog; fake
+         * self-tests and argument/help handling remain entirely isolated.
+         * Exiting this helper neither broadens the restart guard nor sends
+         * an additional signal to its previously verified service target. */
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 18 * NSEC_PER_SEC),
+            dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                fprintf(stderr, "Camera service helper exceeded its 18-second deadline; exiting this helper only (status 124).\n");
+                _exit(124);
+            });
         LiveServiceEnvironment *environment = [LiveServiceEnvironment new];
         if (!restart) {
             ServiceSnapshot *snapshot = [environment inspect];

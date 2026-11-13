@@ -6,7 +6,7 @@ SCRIPT_DIR="${0:A:h}"
 PROJECT_ROOT="${SCRIPT_DIR:h}"
 RELEASE_NAME='LUMIX Tether USB Fix'
 OUTPUT_DIR="${PROJECT_ROOT}/dist"
-RELEASE_VERSION='1.0.1'
+RELEASE_VERSION='1.0.2'
 PACKAGE_TMP=''
 DRY_RUN=0
 die() { print -u2 -r -- "Packaging failed: $*"; exit 1; }

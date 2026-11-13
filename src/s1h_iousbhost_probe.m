@@ -32,6 +32,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -46,7 +49,8 @@ enum {
     ProbeMultipleInterfaces = 21,
     ProbeOpenFailed = 22,
     ProbeDrainFailed = 23,
-    ProbeSessionFailed = 24
+    ProbeSessionFailed = 24,
+    ProbeIdentityChanged = 25
 };
 
 typedef struct {
@@ -54,7 +58,54 @@ typedef struct {
     BOOL ioBuffer;
     BOOL readAfterOutError;
     BOOL drainInput;
+    BOOL requireS1H;
+    uint64_t expectedInterfaceID;
 } ProbeOptions;
+
+static BOOL parse_registry_id(const char *text, uint64_t *value) {
+    if (!text || !*text) return NO;
+    for (const char *p = text; *p; ++p) if (*p < '0' || *p > '9') return NO;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno == ERANGE || !end || *end || !parsed) return NO;
+    *value = (uint64_t)parsed;
+    return YES;
+}
+
+static BOOL exact_s1h_names(NSString *primary, NSString *alternate) {
+    return (primary.length || alternate.length) &&
+        (!primary.length || [primary isEqualToString:@"DC-S1H"]) &&
+        (!alternate.length || [alternate isEqualToString:@"DC-S1H"]);
+}
+
+static NSString *parent_usb_name(io_service_t service, CFStringRef key) {
+    CFTypeRef raw = IORegistryEntrySearchCFProperty(service, kIOServicePlane, key,
+        kCFAllocatorDefault, kIORegistryIterateParents | kIORegistryIterateRecursively);
+    id value = CFBridgingRelease(raw);
+    return [value isKindOfClass:NSString.class] ? value : nil;
+}
+
+static int strict_identity_self_test(void) {
+    unsigned checks = 0, failures = 0;
+#define ID_CHECK(test, message) do { ++checks; if (!(test)) { ++failures; printf("FAIL %s\n", message); } } while (0)
+    uint64_t value = 0;
+    ID_CHECK(parse_registry_id("4295245388", &value) && value == 4295245388ULL,
+             "Registry IDs preserve values above 32 bits");
+    ID_CHECK(parse_registry_id("18446744073709551615", &value) && value == UINT64_MAX,
+             "Registry ID accepts the full unsigned range");
+    for (const char **p = (const char *[]){"", "0", "-1", "+1", "1.5", " 1", "1 ", "18446744073709551616", NULL}; *p; ++p)
+        ID_CHECK(!parse_registry_id(*p, &value), "Registry ID rejects invalid or overflowing input");
+    ID_CHECK(exact_s1h_names(@"DC-S1H", nil), "One matching primary model is sufficient");
+    ID_CHECK(exact_s1h_names(nil, @"DC-S1H"), "One matching alternate model is sufficient");
+    ID_CHECK(exact_s1h_names(@"DC-S1H", @"DC-S1H"), "Matching model evidence agrees");
+    ID_CHECK(!exact_s1h_names(nil, nil), "Missing model identity refuses USB access");
+    ID_CHECK(!exact_s1h_names(@"DC-GH5", nil), "A shared USB ID does not authorize another model");
+    ID_CHECK(!exact_s1h_names(@"DC-S1H", @"DC-GH5"), "Conflicting model evidence refuses USB access");
+#undef ID_CHECK
+    printf("Identity self-test: %u checks, %u failures; no hardware access.\n", checks, failures);
+    return failures ? 1 : 0;
+}
 
 static uint16_t read16(const unsigned char *p) {
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
@@ -413,11 +464,30 @@ static int probe(ProbeOptions options) {
         if (selected) IOObjectRelease(selected);
         selected = current;
     }
+    BOOL iteratorValid = IOIteratorIsValid(iterator);
     IOObjectRelease(iterator);
+    if (!iteratorValid) {
+        if (selected) IOObjectRelease(selected);
+        printf("USB registry changed during selection; no interface was opened.\n");
+        return ProbeIdentityChanged;
+    }
     if (matches != 1) {
         printf("Expected one matching interface; found %u.\n", matches);
         if (selected) IOObjectRelease(selected);
         return matches == 0 ? ProbeNoInterface : ProbeMultipleInterfaces;
+    }
+
+    uint64_t currentID = 0;
+    BOOL identityOK = !options.expectedInterfaceID ||
+        (IORegistryEntryGetRegistryEntryID(selected, &currentID) == KERN_SUCCESS &&
+         currentID == options.expectedInterfaceID);
+    if (options.requireS1H) identityOK = identityOK && exact_s1h_names(
+        parent_usb_name(selected, CFSTR("USB Product Name")),
+        parent_usb_name(selected, CFSTR("kUSBProductString")));
+    if (!identityOK) {
+        IOObjectRelease(selected);
+        printf("Camera model or registry identity changed; no interface was opened.\n");
+        return ProbeIdentityChanged;
     }
 
     NSError *error = nil;
@@ -497,18 +567,31 @@ static int probe(ProbeOptions options) {
 }
 
 int main(int argc, const char *argv[]) {
-    ProbeOptions options = {NO, NO, NO, NO};
+    ProbeOptions options = {0};
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--events") == 0) options.events = YES;
         else if (strcmp(argv[i], "--io-buffer") == 0) options.ioBuffer = YES;
         else if (strcmp(argv[i], "--read-after-out-error") == 0) options.readAfterOutError = YES;
         else if (strcmp(argv[i], "--drain-input") == 0) options.drainInput = YES;
+        else if (strcmp(argv[i], "--require-s1h") == 0) options.requireS1H = YES;
+        else if (strcmp(argv[i], "--expected-interface-id") == 0) {
+            if (++i >= argc || !parse_registry_id(argv[i], &options.expectedInterfaceID)) {
+                fprintf(stderr, "Expected a nonzero decimal USB interface registry ID.\n");
+                return 2;
+            }
+        }
+        else if (strcmp(argv[i], "--self-test") == 0 && argc == 2) {
+            @autoreleasepool { return strict_identity_self_test(); }
+        }
         else if (strcmp(argv[i], "--help") == 0) {
             printf("Usage: %s [--events] [--io-buffer] [--read-after-out-error] [--drain-input]\n", argv[0]);
             printf("--events: queue interrupt IN 0x83 before OpenSession.\n");
             printf("--io-buffer: use fixed-length native kernel DMA buffers.\n");
             printf("--read-after-out-error: seek matching PTP IN after an OUT completion error.\n");
             printf("--drain-input: consume old input before OUT; require a boundary timeout within 3 seconds / 5 containers.\n");
+            printf("--require-s1h: require exact, non-conflicting DC-S1H USB product names before opening.\n");
+            printf("--expected-interface-id ID: refuse a different USB interface registry ID before opening.\n");
+            printf("--self-test: pure identity validation only; no hardware access.\n");
             return 0;
         } else {
             fprintf(stderr, "Usage: %s [--events] [--io-buffer] [--read-after-out-error] [--drain-input]\n", argv[0]);
@@ -516,6 +599,9 @@ int main(int argc, const char *argv[]) {
         }
     }
     setvbuf(stdout, NULL, _IONBF, 0);
+    // If the owning UI crashes, finish this bounded transaction and cleanup
+    // even when its logging pipe has disappeared.
+    signal(SIGPIPE, SIG_IGN);
     /* A process-level limit also bounds unexpected open/destroy blocking.
      * This source is intentionally a one-shot CLI, never a service. */
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 18 * NSEC_PER_SEC),

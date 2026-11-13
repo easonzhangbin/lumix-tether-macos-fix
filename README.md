@@ -1,178 +1,85 @@
-# LUMIX Tether USB Fix for macOS
+# LUMIX Connection Guardian
 
 [简体中文](README.zh-CN.md)
 
-Latest release: [v1.0.1](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/v1.0.1).
+<img src="experiments/connection-guardian/assets/GuardianAppIcon-source-v1.png" alt="LUMIX Connection Guardian app icon" width="120">
 
-Use v1.0.1 in place of the initial v1.0.0 release. The older release remains available as history; it does not include the newer ownership diagnostics and opt-in service restart.
+**Reconnect your S1H to Mac, and keep shooting with official LUMIX Tether.**
 
-A small Apple Silicon USB recovery helper, started by a `.command` script, that clears pending PTP responses before opening Panasonic LUMIX Tether 2.12. It restored USB tethering and live view on one tested Panasonic DC-S1H setup, over both USB 2 and USB 3.
+An independent Apple Silicon menu-bar utility that prepares the S1H USB connection, hands it to official Tether 2.12, and watches connection and application lifecycles. Panasonic's application supplies live view, shooting, aperture, shutter, ISO, white balance and original-file saving. Guardian supplies connection recovery and a clear way to finish a session.
 
-**Use the script before each Tether launch.** The problem has recurred after unplugging and reconnecting USB3. This is a launch-time recovery procedure, not a permanent driver or firmware fix.
+[Download Guardian 0.2.1 beta](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.1) · [Source and detailed guide](experiments/connection-guardian/README.md) · [Earlier recovery scripts](docs/CLI.md)
 
-This is an independent community project. It is not affiliated with Panasonic or Apple.
+This is a community beta tested on one S1H setup. It is not affiliated with Panasonic or Apple. Official Tether must be installed separately; the download contains this project's own app and helpers only.
 
-## What is included
+## What it does
 
-- **Restore S1H Connection.command** and **恢复S1H连接.command**, equivalent script entry points.
-- **Restart Camera Service and Restore.command** and **重启相机服务并恢复连接.command**, explicit service-restart entry points for a connection still owned by the camera service.
-- A native IOUSBHost recovery helper at `bin/s1h_iousbhost_probe`.
-- A guarded service-ownership helper at `bin/s1h_camera_service`.
-- Automatic selection of Tether's existing interface language, with a command-line override.
-
-The release ZIP extracts to a folder containing the scripts and `bin/`. Keep them together. **It does not contain LUMIX Tether, Panasonic's installer or icons, or Qt libraries.** Install the official application separately.
-
-## Tested configuration
-
-| Component | Verified setup |
+| Action | Behavior |
 | --- | --- |
-| Camera | Panasonic DC-S1H |
-| Mac | MacBookPro18,2, Apple M1 Max |
-| macOS | 27.0.1, build 26A434 |
-| Tether | 2.12, build 2.12.0.5 |
-| USB 2 | 480 Mbps negotiated link; Tether live view restored |
-| USB 3 | 5 Gbps negotiated link; Tether live view restored |
+| Start Guardian | Check the camera and other clients, prepare a fresh USB/PTP session while Tether is absent, then open official Tether. Starting opts in to guarded recovery of the current user's camera service when checks permit. |
+| Observe | Show USB detection, negotiated link speed, Tether process state and a separate shooting-connection status. No new USB recovery starts while Tether is known to be running. Confirm actual preview and capture inside Tether. |
+| Pause Recovery | Stop future automatic recovery and leave Tether as it is. |
+| End This Shoot | Disable recovery first, then request a normal Tether quit. Keep Guardian in the menu bar without automatically reopening Tether. Finish transfers before using this action. |
+| Reconnect | Request normal Tether quit, prepare the connection again and reopen it. A quit timeout enables a separate explicit Force Quit/Force Restart action; it never forces Tether automatically. |
+| Diagnose | Keep rotating local event logs for actions, recovery steps, launch requests and process observations, alongside the existing helper diagnostics. |
 
-These are negotiated USB link speeds, not measured file-transfer throughput. Long-duration stability has not been measured, and reconnecting the camera can require another recovery.
+A physical disconnect may request normal quit of the exact verified Tether instance Guardian launched. Recovery retries are bounded. Unknown ownership or other camera software can block service recovery. Guardian cannot reserve USB globally while allowing Tether to use it, or repair every internal Tether hang.
 
-The helper is built for **arm64 / Apple Silicon**, with a macOS 12 deployment target. The actual hardware test above was on macOS 27.0.1; the deployment target does not establish compatibility with every intervening macOS release. Intel Macs are not supported by this release.
+## Install and use
 
-**DC-S1R, DC-S1 and other LUMIX cameras are untested.** Some bodies may share USB identifiers, but that does not establish that this recovery procedure is appropriate for them.
+1. Install **official LUMIX Tether 2.12** from [Panasonic](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html), in `/Applications` or `~/Applications`.
+2. Download and extract the [Guardian beta ZIP](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.1). Move **LUMIX Connection Guardian.app** to your Applications folder.
+3. Close other camera/import applications. Connect the S1H with a data cable and select **PC(Tether)**.
+4. Open Guardian and click **Start Guardian**. In official Tether, select the camera, click **Start**, then **LV**. Confirm preview and take a test photo into your chosen destination.
+5. After capture and file transfer finish, click **End This Shoot**. Closing Guardian's status window keeps its menu-bar item available.
 
-## Getting started
+Guardian starts idle and does not install a login item or persistent system service. Its UI follows Chinese/English system preferences; official Tether is launched with its existing supported-language option, with English fallback. No vendor resources are replaced.
 
-1. Download and install **LUMIX Tether 2.12** from [Panasonic's official download page](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html).
-2. Download this project's ZIP from [Releases](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases) and extract the folder.
-3. Close Tether and all other camera or photo-import applications. Keep the other applications closed while using Tether. Connect the S1H with a data-capable USB cable and choose **PC(Tether)** on the camera.
-4. Double-click **Restore S1H Connection.command** or **恢复S1H连接.command**. It runs in Terminal and looks for official Tether 2.12 in `/Applications` and `~/Applications`.
-5. After recovery and a successful fresh-session check, the script opens Tether. Select the camera, click **Start**, then **LV** for live view.
+The app is locally ad-hoc signed and **not Developer ID notarized**. Another Mac may block a downloaded copy. Review its source and origin and follow [Apple's safe-opening instructions](https://support.apple.com/en-us/102445). The tool does not disable system protections. macOS may separately request accessory or removable-volume permission for the app being used.
 
-Start Tether through the script each time, including after reconnecting the camera. A successful session does not prevent the condition from recurring. The default recovery does not forcibly stop camera applications or restart macOS's camera service.
+## Verified, and still unverified
 
-If macOS asks Tether or Terminal for access to the camera's removable volume, or asks permission to connect a USB accessory, allow the access needed by the application you are using. If recovery succeeds but Tether cannot connect, check **System Settings → Privacy & Security → Files and Folders** for the actual Tether 2.12 application. System permission may still be required after a successful protocol recovery.
+| Item | Observed result |
+| --- | --- |
+| Hardware | Panasonic DC-S1H; Apple M1 Max, MacBookPro18,2 |
+| System / official app | macOS 27.0.1 (26A434); Tether 2.12.0.5 |
+| USB | 5 Gbps negotiated USB3; earlier script recovery also worked at 480 Mbps USB2 |
+| Actual shooting | After a Guardian recovery handoff, official live view worked and one 6000×4000 RAW was captured and saved: 36,048,384 bytes |
+| Camera controls | Aperture, shutter, ISO and color temperature were changed and restored separately in the official UI |
+| Session controls | Pause preserved Tether; End closed it normally with no automatic reopen in a short observation |
+| Automated checks | 236 passed: 16 USB identity, 43 service-guard, 49 event-log, 128 controller/policy checks; these use pure or fake environments |
 
-For a nonstandard installation path, run the script from the extracted release folder:
+Repeated Guardian hot-plug recovery, sleep/wake, long shoots, bursts, other Macs/macOS versions and other bodies remain unverified. **S1R, S1 and other models are not supported by this S1H beta's strict identity path.** arm64 only; the macOS 12 build target is not a claim that every later OS has been tested.
 
-```sh
-./"Restore S1H Connection.command" --tether-app "/path/to/LUMIX Tether.app"
-```
+**5 Gbps is the negotiated link mode, not live MB/s.** This passive monitor does not obtain reliable per-camera throughput counters on the tested setup. It does not substitute file-write speed or an unmeasured zero for USB throughput.
 
-The selected app must be official Tether 2.12.
+## Local event logs
 
-### Keeping other applications off the camera
+`~/Library/Logs/S1H Connection Guardian/events.jsonl` records timestamps, run/attempt IDs, actions and outcomes. It rotates at 1 MiB per file with three archives. Use **Show Diagnostics and Logs Folder** to find it.
 
-The recovery helper must release the USB interface before official Tether can open it. In this recovery-then-launch design, leaving the helper running with an exclusive USB lock would also prevent Tether from connecting. The tool therefore provides **no permanent reservation of the interface for Tether**.
+A Guardian-issued launch request and the application returned by macOS are recorded separately. An externally observed process is labeled `external_or_unknown`; logs do not infer a human action from `launchd` or prove which actor created a process. They also do not claim that a shutter fired or shooting is working.
 
-Use this sequence when a connection is lost:
+Event fields exclude camera serials, photographs, full paths and raw inspection objects. Separate helper logs include process metadata; review any excerpt before sharing. Nothing is automatically uploaded.
 
-1. Quit all camera/import applications and keep them closed while using Tether.
-2. After a USB reconnect or sleep/wake, quit Tether, confirm PC(Tether), and run the **normal recovery script first**.
-3. If the interface is still busy, run `--diagnose`. Use the [explicit service-restart entry point](#if-the-camera-service-still-owns-the-interface) only when the diagnostic identifies the camera service as the owner.
-4. If the guard refuses, follow its diagnostic: close the identified application and leave only one camera connected. Do not force-stop an unknown owner. If ownership cannot be resolved, save your work and restart the Mac as a last controlled recovery step, then run normal recovery again.
+## Build
 
-#### Optional: reduce automatic importer launches
-
-With Tether closed, open Image Capture, select the connected camera, and use its Action/options control to set **Connecting this [device] opens → No application**, if available. The control's location varies by macOS version. Quit Image Capture afterward. See [Apple's per-device connection menu](https://support.apple.com/guide/image-capture/image-capture-imgcp1003/mac) and [Capture One's official No Application instructions](https://support.captureone.com/hc/en-us/articles/360002423997-Why-does-Capture-One-automatically-start-every-time-I-connect-my-camera-CF-card-or-iPhone).
-
-This reduces automatic app launches only. It does not stop an application that is already running from noticing or accessing the camera, and it does not lock USB ownership.
-
-### If the camera service still owns the interface
-
-Version 1.0.1 adds a read-only ownership check and a separate, opt-in service-restart mode. Normal recovery never restarts the service automatically. If recovery fails, the script checks ownership read-only and points to the explicit restart entry point when appropriate.
-
-To collect diagnostics without opening the USB interface, running the PTP probe, launching Tether or restarting the service:
+Use Xcode Command Line Tools on an Apple Silicon Mac:
 
 ```sh
-./"Restore S1H Connection.command" --diagnose
+./experiments/connection-guardian/build.sh
+./experiments/connection-guardian/package.sh
 ```
 
-If the diagnostic reports that `ptpcamerad` still owns the interface:
+Builds and self-tests do not open the camera or launch Tether. For iCloud-synchronized source folders, use the output-directory option in the [detailed guide](experiments/connection-guardian/README.md) to avoid file-provider metadata affecting strict app signatures.
 
-1. Close **all camera and photo-import applications**, including Tether, Preview, Image Capture and Photos if running.
-2. Double-click **Restart Camera Service and Restore.command**, or explicitly select the same mode in Terminal:
-
-   ```sh
-   ./"Restore S1H Connection.command" --restart-camera-service
-   ```
-
-3. The tool checks ownership and process identity, then attempts the service restart, the strict USB recovery and finally the Tether launch. A failed guard stops the sequence.
-
-**This explicitly interrupts the current user's PTP camera service.** The guarded restart may send a normal termination request, then force-stop the same verified service instance if it does not exit within the bounded wait. Although known camera apps and ownership are checked, the tool cannot prove that every background XPC client is idle; close all camera/import software first. Unknown ownership, other PTP-camera ownership or a running camera app can cause the restart to be refused.
-
-This mode does not use `sudo`, change security settings or install a persistent service. `--diagnose` cannot be combined with `--check` or `--restart-camera-service`. Each diagnostic or recovery run prints the path to its log; review it for private paths before sharing excerpts.
-
-### Language
-
-Each script launch explicitly selects Tether's language from the system's preferred language. Tether supports `zh`, `en`, `ja`, `de`, `es`, `fr`, `it` and `ru`; other preferred languages fall back to English.
-
-You can override the choice or run a check without accessing the camera:
-
-```sh
-./"Restore S1H Connection.command" --language en
-./"Restore S1H Connection.command" --language zh
-./"Restore S1H Connection.command" --language auto --check
-```
-
-The other supported language codes can also be passed to `--language`. Tether 2.12 already contains these translations; the script passes its existing `-lang=xx` argument without replacing resources or patching Panasonic's executable.
-
-**Start through the script when you want automatic language selection.** Opening the original Tether icon directly may use a previously saved language such as English.
-
-### If macOS blocks a downloaded file
-
-The helper uses a local ad-hoc signature and has not been notarized with an Apple Developer ID. Gatekeeper may block downloaded scripts or the helper on another Mac. Review the source and download origin, then follow [Apple's instructions for opening apps safely](https://support.apple.com/en-us/102445) if you decide to trust the files.
-
-## How the recovery works
-
-On the tested S1H, an unread `GetDeviceInfo` transaction remained on the bulk-IN endpoint: a 237-byte Data container followed by a 12-byte OK Response, both with transaction ID 0. Attempts to write a new command timed out.
-
-Investigation of a later USB3 reconnection found a second obstacle: the macOS PTP camera service, `ptpcamerad`, still owned the interface after all camera applications had been closed. The helper could not access the interface until that stale service instance released it. Preview was registered as a client earlier, but a subsequent USB3 failure also occurred with Preview closed. Closing Preview alone is therefore not a complete fix, and the observations do not establish it as the cause.
-
-The helper uses Apple's native IOUSBHost API to consume complete pending containers. It treats a zero-byte timeout **at a container boundary** as an empty queue, then verifies a fresh `OpenSession` → `GetDeviceInfo` → `CloseSession` exchange. Only after that check does the script open Tether.
-
-Recovery therefore needs both an available interface and a clean PTP transaction state. It does **not** establish which component created the pending transaction, permanently repair Apple's USB stack, or establish a universal cause for LUMIX connection failures on newer macOS versions. See [the technical notes](docs/TECHNICAL.md) for the evidence and limits.
-
-The helper does not take pictures, delete images, update firmware, or log image payloads or camera serial numbers.
-
-## Troubleshooting
-
-**Tether 2.11 opens or an old shortcut crashes.** Confirm the version of the application being opened. An old Dock item or shortcut can still point to 2.11. This script requires official Tether 2.12 and rejects 2.11; a crash from the older app is not evidence that the 2.12 recovery failed.
-
-**The camera or interface is busy.** Close Tether and other camera clients, including Preview or an import window if they are accessing the camera. If the interface remains busy after those apps exit, a stale `ptpcamerad` instance may still own it. An ownership error happens before the helper can drain PTP responses; it is a different failure stage from a command-write timeout. Use `--diagnose`, then the [explicit service-restart mode](#if-the-camera-service-still-owns-the-interface) if appropriate. The default script does not terminate the service automatically.
-
-**It worked once, then failed after reconnecting.** This has been reproduced on the tested USB3 setup. Run the recovery script again before Tether. If it reports a busy interface even after camera applications are closed, include that stage and the reconnect sequence in a bug report. An earlier successful live-view session does not demonstrate a permanent system-level repair.
-
-**No camera is found.** Check power, the data cable, the USB mode and any macOS accessory-connection prompt. This tool cannot repair a missing physical USB connection.
-
-**A different camera is not working.** Please report the exact model as an untested configuration. Do not assume support from a shared USB ID.
-
-For a report, use the [bug template](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues/new?template=bug_report.yml). Share only the relevant status and error lines. Do not post a camera serial number or an unredacted crash report.
-
-## Building from source
-
-The default public build needs Xcode Command Line Tools on an Apple Silicon Mac. It uses system frameworks and does not require Homebrew, Python or third-party libraries.
-
-From the repository root:
-
-```sh
-./scripts/build.sh
-./scripts/self-check.sh
-./scripts/package.sh
-```
-
-The build creates `dist/LUMIX Tether USB Fix/`, containing the normal and explicit service-restart `.command` entry points, plus the helpers in `bin/`. Packaging creates a public arm64 ZIP and its SHA-256 checksum in `dist/`. The self-check validates the artifact without opening the camera or running Tether. Use each script's `--help` option for its full interface.
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md). Reports from additional cameras and macOS versions are welcome, with clear separation between a successful handshake and verified Tether live view.
+The earlier `.command` tools remain available in [v1.0.1](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/v1.0.1); see their [CLI guide](docs/CLI.md). The main branch also includes unreleased CLI 1.0.2 guard corrections. [Technical evidence and limits](docs/TECHNICAL.md), [contributing](CONTRIBUTING.md), and [bug reports](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues/new?template=bug_report.yml).
 
 ## Support development
 
-If this tool helps your work, you can support development through Alipay. Support is entirely optional.
+Optional Alipay support helps further compatibility work and testing.
 
 <img src="assets/alipay-donate.jpg" alt="Alipay donation QR code" width="240">
 
-## License and third-party software
+## License
 
-This project's original scripts, recovery helper and documentation are available under the [MIT License](LICENSE), copyright © 2026 Eason Zhang / easonzhangbin.
-
-The MIT license does not apply to Panasonic LUMIX Tether, Panasonic artwork, Qt or other third-party components. Those remain subject to their respective licenses. LUMIX and Panasonic are trademarks of their respective owners.
+Original project code and documentation: [MIT](LICENSE), © 2026 Eason Zhang / easonzhangbin. The included app icon is an original generated asset. Panasonic LUMIX Tether, its artwork and Qt remain third-party software and are not distributed here. LUMIX and Panasonic are trademarks of their owners.

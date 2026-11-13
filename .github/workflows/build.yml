@@ -23,12 +23,18 @@ jobs:
         run: ./scripts/self-check.sh
       - name: Run isolated recovery mocks and pure guard tests
         run: ./scripts/test-recovery.sh
+      - name: Compile Guardian beta and run isolated event and policy checks
+        run: ./experiments/connection-guardian/build.sh
+      - name: Package Guardian beta and verify an independent extraction
+        run: ./experiments/connection-guardian/package.sh
       - name: Package and verify an independent extraction
-        run: ./scripts/package.sh --version 1.0.1
+        run: ./scripts/package.sh --version 1.0.2
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: LUMIX-Tether-USB-Fix-arm64
           path: |
             dist/*.zip
             dist/*.sha256
+            experiments/connection-guardian/dist/*.zip
+            experiments/connection-guardian/dist/*.sha256
           retention-days: 14

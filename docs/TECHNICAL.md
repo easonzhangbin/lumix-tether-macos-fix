@@ -2,9 +2,9 @@
 
 ## Scope / 范围
 
-This document records one recovered configuration, not a universal diagnosis for macOS or LUMIX cameras. The public tool consists of `.command` scripts and a native helper in the same release folder.
+This document records one recovered configuration, not a universal diagnosis for macOS or LUMIX cameras. The public tool consists of `.command` scripts and native USB-recovery and ownership helpers in the same release folder.
 
-本说明记录一套已恢复的环境，不代表对所有 macOS 或 LUMIX 机型的通用诊断。公开工具由同一个发布目录内的 `.command` 脚本与原生恢复程序组成。
+本说明记录一套已恢复的环境，不代表对所有 macOS 或 LUMIX 机型的通用诊断。公开工具由同一个发布目录内的 `.command` 脚本、原生 USB 恢复程序及占用诊断程序组成。
 
 | Component / 项目 | Observed / 实测 |
 | --- | --- |
@@ -15,9 +15,9 @@ This document records one recovered configuration, not a universal diagnosis for
 | Links / 链路 | USB2 480Mbps; USB3 5Gbps |
 | Final result / 最终结果 | Tether camera controls and actual live view restored on both links / 两种链路均恢复 Tether 相机控制与实际实时预览 |
 
-The link rates above are negotiated speeds. File-transfer throughput and long-duration stability were not measured. The problem recurred after a later USB3 reconnection. DC-S1R, DC-S1 and other bodies remain untested.
+The link rates above are negotiated speeds, not measured payload throughput. A later, separate capture/download test is recorded below. The problem recurred after a later USB3 reconnection. DC-S1R, DC-S1 and other bodies remain untested.
 
-以上为协商速率，未测文件传输吞吐量及长时间稳定性。后来一次 USB3 重连后问题复发。DC-S1R、DC-S1 和其他机型尚未验证。
+以上为协商速率，不是有效数据吞吐量。后续独立拍摄／下载测试见下文。后来一次 USB3 重连后问题复发。DC-S1R、DC-S1 和其他机型尚未验证。
 
 ## Failure evidence / 故障证据
 
@@ -177,19 +177,85 @@ A pending `GetDeviceInfo` response with transaction ID 0 could be mistaken for a
 - 正常退出 Tether 后，明确的重启入口重新核验目标，通过有时间上限的 TERM 及后续 KILL 使旧服务释放接口；随后排空同样的事务 0 残留（237 字节 Data、12 字节 OK），三步新会话检查全部通过，官方 Tether 2.12 以中文启动并显示实际实时画面。
 - 这些结果验证了观察到的恢复路径，不等于长时间稳定性测试，也不保证将来所有 USB 重连都不会再失败。
 
-## Longer-term transport work / 后续通信层工作
+## Guard shutdown race fix / 守卫退出竞态修复
 
-The current native helper owns the interface only during recovery and releases it before official Tether starts. It cannot keep exclusive ownership and simultaneously allow Tether's camera service to use the same interface.
+The unreleased v1.0.2 source includes the following guard change, which is absent from v1.0.1. The validation above remains the historical record for v1.0.1.
 
-Read-only inspection of official Tether 2.12 found a Qt UI calling `libLmxptpif.dylib`; that library uses ImageCaptureCore camera discovery, session and PTP-command APIs. There is therefore a UI/communication boundary, but replacing the library while retaining the UI would require matching a large private C++ ABI, callbacks and event/session behavior. No such replacement or vendor binary patch is implemented in this release.
+尚未发布的 v1.0.2 源码包含以下守卫修改，v1.0.1 不含此修改。上节保留 v1.0.1 的历史验证记录。
 
-A separate minimal S1H application using one native USB/PTP queue for connection, preview, timeout recovery and reconnection is another possible direction. The strict native transactions and an earlier successful JPEG-preview experiment support investigating it. Continuous frame rate, long-duration operation, sleep/wake and hot-plug behavior still need implementation and measurement. A successful recovery is not evidence that this prospective application is already stable.
+### Service shutdown inventory race / 服务退出时的进程快照竞态
 
-当前原生辅助程序只在恢复期间持有接口，官方 Tether 启动前必须释放。它不能一边持续独占接口，一边让 Tether 的相机服务使用同一接口。
+Process inventory and subsequent owner-identity lookup are separate observations. After a verified service receives the permitted TERM or KILL and exits, a later lookup can report `ESRCH` while the earlier inventory still contains that exact process identity and IORegistry has not yet released its ownership record. The previous guard could reject this transition as `owner_identity_unavailable` even though the selected process had exited.
 
-对官方 Tether 2.12 的只读检查发现：Qt 界面调用 `libLmxptpif.dylib`，该库通过 ImageCaptureCore 执行发现相机、打开会话及发送 PTP 命令。因此确实存在界面与通信层的边界，但保留界面并替换该库，需要兼容大量私有 C++ ABI、回调、事件和会话行为。本版本没有实现此类替换，也没有修改厂商二进制。
+The revised guard permits only an earlier entry matching the already verified PID, UID, executable path and start time to enter a bounded wait for ownership release when the process is now absent. It does not send another signal, assume the interface is already free, or accept another owner. A changed identity, including a reused PID with a different start time, remains a refusal. This addresses a false refusal during shutdown; it does not change USB recovery or install a persistent service.
 
-另一条可研究的路线是独立的最小 S1H 应用，由同一原生 USB／PTP 队列负责连接、预览、超时恢复与重连。已有的严格原生握手及此前成功取得 JPEG 预览的实验支持继续探索；连续帧率、长时间运行、睡眠唤醒及热插拔仍需开发与测量，不能由一次恢复成功推断其已稳定。
+Forty-three simulated guard checks and fourteen isolated launcher tests passed for the revised guard, without hardware access or real process signals. These checks are separate from the historical hardware recovery and do not establish long-duration stability.
+
+进程列表快照与后续占用者身份查询并非原子操作。已经验证的服务收到允许的 TERM 或 KILL 并退出后，后一次查询可能返回 `ESRCH`，但较早快照仍含该进程的完整旧身份，IORegistry 也可能尚未释放占用记录。此前守卫可能在这个过渡阶段以 `owner_identity_unavailable` 拒绝继续，即使目标进程已经退出。
+
+修订守卫仅允许与此前已验证的 PID、UID、可执行路径、启动时间完全一致的旧快照，在确认进程已不存在后，进入有时间上限的占用释放等待。它不会追加信号、假定接口已经空闲，或接受其他占用者。身份改变仍被拒绝，包括 PID 被复用但启动时间不同的情况。此修改处理退出阶段的误拒绝，不改变 USB 恢复流程，也不安装常驻服务。
+
+修订守卫已通过 43 项模拟检查和 14 项隔离启动脚本测试，均不访问硬件、不发送真实进程信号。这些检查与此前实机恢复观察分别记录，不能证明长期稳定性。
+
+## Official Tether stop/quit hang / 官方 Tether 停止及退出挂起
+
+An anonymized hang report from official Tether 2.12.0.5 showed its main thread in `DeviceAdapter::~DeviceAdapter` → `LiveViewManager::ForceStop` → `StopLive` → `std::thread::join`. The preview worker synchronously depended on the vendor request queue, whose command-timeout recovery path had entered `Controller closeSession` and was waiting on a semaphore.
+
+Static inspection of the matching vendor library showed that this close path calls the legacy ImageCaptureCore `requestCloseSession`, runs a run loop with a 10-second limit, then waits on the session semaphore with a further 10-second limit. Its close-session delegate stops that run loop and signals that semaphore. Apple documents that the legacy API's delegate callback runs on the main thread. This supports a specific dependency cycle: the main thread waits for the preview worker, while the worker's request path needs a close callback on the main thread. See [Apple's legacy close-session API](https://developer.apple.com/documentation/imagecapturecore/icdevice/requestclosesession()).
+
+The sampled waits have configured time limits, and the vendor path can subsequently attempt reconnection. The report therefore supports a stop/quit delay caused by timeout recovery; it does not prove an unlimited deadlock, the callback queue of every PTP operation, or a unique cause in Apple's USB stack. The camera service also had a waiting thread, but the report did not establish its complete causal relationship to this cycle.
+
+The smallest candidate for retaining official Tether's UI is a stop/quit lifecycle change: stop issuing preview requests, suppress reconnection while stopping, keep the main thread available for callbacks, and destroy the adapter after its worker finishes asynchronously. This project has not implemented a vendor patch, injected a library or re-signed the official app. The public recovery launcher does not repair Tether's internal shutdown behavior. The raw report, private process identifiers and image payloads are excluded from this repository.
+
+一份官方 Tether 2.12.0.5 的匿名化挂起报告显示，主线程停在 `DeviceAdapter::~DeviceAdapter` → `LiveViewManager::ForceStop` → `StopLive` → `std::thread::join`。预览 worker 同步依赖厂商请求队列；请求队列中的命令超时恢复流程已进入 `Controller closeSession`，正在等待 semaphore。
+
+对匹配厂商库的静态检查发现，该关闭流程调用旧式 ImageCaptureCore `requestCloseSession`，先运行最多 10 秒的 run loop，再以另外 10 秒上限等待 session semaphore。关闭会话的 delegate 会停止该 run loop 并 signal 同一 semaphore。Apple 文档规定旧 API 的 delegate 回调在主线程执行。因此有证据支持一个具体等待环：主线程等预览 worker 退出，而 worker 依赖的请求流程需要主线程处理关闭回调。参见 [Apple 旧式关闭会话 API](https://developer.apple.com/documentation/imagecapturecore/icdevice/requestclosesession())。
+
+采样所在等待均配置了时间上限，厂商路径之后还可能尝试重连。因此报告支持“超时恢复拖住停止／退出”的判断，尚不能证明无限死锁、所有 PTP 操作的回调队列，或故障唯一来自 Apple USB 栈。相机服务也存在等待线程，但报告没有建立它与此等待环的完整因果关系。
+
+保留官方界面的最小候选是调整停止／退出生命周期：停止发出新预览请求，停止期间禁止自动重连，保持主线程可处理回调，并在 worker 异步结束后销毁 adapter。本项目尚未实现厂商补丁、注入库或重签官方应用；公开恢复脚本不能修复 Tether 内部退出行为。原始报告、私人进程标识及图像内容不进入本仓库。
+
+## Connection Guardian beta / 连接守护测试版
+
+Guardian 0.2.1 is the menu-bar beta described in the [project introduction](../README.md), with [source and usage](../experiments/connection-guardian/README.md). It retains the unmodified official Tether 2.12 UI for shooting, controls and original-file saving.
+
+Start explicitly enables bounded connection preparation while Tether is absent, including guarded current-user camera-service recovery when permitted. While Tether is known to be running, no new USB/PTP repair is started. Confirmed physical detach may request a normal quit only of the exact verified Tether instance Guardian launched. Reconnect also requests normal quit. Thirty seconds without exit enables a separate explicit force action; it never automatically forces Tether to quit.
+
+End This Shoot disables recovery before waiting for an owned helper/launch to settle and requesting normal Tether quit. The ended session does not reopen Tether automatically. Pause preserves the existing app; it cancels future actions but cannot undo an already-delivered quit request. A stale helper/launch callback cannot restore old launch consent.
+
+The app uses local rotating JSONL event logs with timestamps, run/request IDs, action requests, outcomes and process-observation edges. Guardian launch requests and returned applications are distinct events; externally observed processes retain unknown origin. A returned app does not prove the request created that process. Event fields are restricted metadata; raw diagnostics and photographs are excluded from public artifacts.
+
+Build validation passed 236 hardware-free checks: 16 USB identity, 43 service guard, 49 event writer and 128 controller/policy tests. Controller fixtures exercise the actual asynchronous End/late callback paths with fake helper/process boundaries. Logger tests cover ordering, rotation, permissions and unsafe-file refusal. These checks do not prove real OS force-quit delivery, hot-plug or sleep/wake reliability.
+
+A short Guardian recovery handoff was followed by actual official Tether preview and capture/save of one 6000×4000 RAW, 36,048,384 bytes. Pause retained the official process. End closed Tether normally; a six-second observation saw no automatic reopen. Long-duration work, repeated Guardian USB reconnects, sleep/wake and other hardware remain unverified.
+
+Guardian 0.2.1 是[项目介绍](../README.zh-CN.md)中的菜单栏测试版，[源码及用法](../experiments/connection-guardian/README.zh-CN.md)保持与其一致。拍摄、参数控制及原片保存由未修改的官方 Tether 2.12 完成。
+
+明确开始后，才在 Tether 未运行时进行有上限的连接准备，并在守卫允许时处理本用户的相机服务占用。已知 Tether 运行时不开始新的 USB／PTP 恢复。确认物理断开后，只可请求 Guardian 启动且身份仍一致的 Tether 正常退出；重新连接也先请求正常退出。30 秒未退出仅启用单独的明确强制操作，不会自动强杀。
+
+结束本次拍摄先停止恢复，等待已有辅助程序／启动交接结束，再请求 Tether 正常退出；结束后不会自动重开。暂停保留应用当前状态，但无法撤回已经发出的退出请求。迟到的辅助程序或启动回调不能恢复已撤销的启动授权。
+
+本地 JSONL 事件日志记录时间、运行／请求编号、操作、结果和进程变化。守护器的启动请求与系统返回的应用分开记录；外部观察进程的来源保留未知，返回应用不等于已经证明该请求创建了进程。事件仅含受限制的元数据，公开产物不含原始诊断或照片。
+
+236 项无硬件检查通过：设备身份 16、服务守卫 43、事件日志 49、控制器／策略 128。控制器使用模拟辅助程序和进程边界测试真实异步结束及迟到回调；日志测试覆盖顺序、轮转、权限及不安全目标拒绝。这些不能证明真实系统强制退出、拔插或睡眠唤醒可靠性。
+
+一次短测中，Guardian 恢复交接后，官方 Tether 预览正常，并拍摄保存一张 6000×4000 RAW（36,048,384 字节）。暂停保留了原厂进程；结束拍摄正常关闭 Tether，随后 6 秒未观察到自动重开。长时间拍摄、Guardian 反复拔插、睡眠唤醒及其他硬件仍待验证。
+
+## Official shooting baseline / 原厂拍摄基线
+
+Before testing Guardian, official Tether 2.12 displayed actual S1H live view and remotely captured a RAW file that was saved to a separate local test directory: 35,581,440 bytes, with card + PC storage and RAW transfer enabled. The UI accepted and read back ISO 100 → 200 → 100, shutter 1/60 → 1/80 → 1/60, aperture F8.0 → F7.5 → F8.0, and color temperature 5500 K → 5600 K → 5500 K. The original settings were restored and Tether quit normally. This establishes official shooting and control on this connection, not successful Guardian recovery. Test photos and private reports are excluded.
+
+守护器测试前，官方 Tether 2.12 显示了 S1H 实时画面，并遥控拍摄一张 RAW，已保存到独立本地测试目录，大小 35,581,440 字节；设置为记忆卡＋PC、开启 RAW 传输。界面接受并回读了 ISO 100 → 200 → 100、快门 1/60 → 1/80 → 1/60、光圈 F8.0 → F7.5 → F8.0、色温 5500 K → 5600 K → 5500 K。原设置已恢复，Tether 正常退出。这证明该次连接中的原厂拍摄及控制可用，不等于守护器恢复已经成功。测试照片和私人报告不公开。
+
+## Earlier native transport experiments / 此前原生通信实验
+
+An independent native preview prototype obtained 640×432 preview at about 19 fps and 1600×1072 JPEG at a higher reported format. Three physical reconnect observations succeeded across prototype builds. A separate libgphoto2 harness captured and downloaded one 6000×4000 RAW (36,093,440 bytes), with a 1.851194-second download, about 19.497 MB/s, over a negotiated 5 Gbps link. Neither preview fetch counts nor one RAW transfer measure maximum USB throughput.
+
+The preview-only UI lacks integrated shooting and full camera controls and is not being released as a Tether replacement. These observations do not validate Guardian or general reconnection reliability. The project now prioritizes retaining the official shooting UI with a separate connection supervisor. No vendor binary, camera image or private local harness is distributed.
+
+此前独立原生预览原型取得约 19 帧／秒的 640×432 预览，以及较高档位的 1600×1072 JPEG；不同原型构建累计观察到 3 次物理重连成功。另一个 libgphoto2 本地程序拍摄并下载过一张 6000×4000 RAW（36,093,440 字节），下载 1.851194 秒，约 19.497 MB/s，链路协商为 5 Gbps。预览获取次数和一次 RAW 下载都不能测出 USB 最高吞吐。
+
+仅预览界面尚未集成拍摄及完整参数控制，不作为 Tether 替代品发布。这些观察不能验证守护器或普遍重连可靠性。当前优先保留原厂拍摄界面，另做连接守护；不分发厂商程序、相机图像或私人测试程序。
 
 ## Known and unknown / 已知与未知
 

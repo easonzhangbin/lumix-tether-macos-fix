@@ -62,10 +62,21 @@ STAGED_RELEASE="${BUILD_TMP}/${RELEASE_NAME}"
     -o "${STAGED_RELEASE}/bin/s1h_camera_service"
 /usr/bin/codesign --force --sign - --timestamp=none "${STAGED_RELEASE}/bin/s1h_camera_service"
 for document_name in README.md README.zh-CN.md LICENSE CONTRIBUTING.md docs/TECHNICAL.md assets/alipay-donate.jpg; do
-    if [[ -f "${PROJECT_ROOT}/${document_name}" ]]; then
+    document_source="${PROJECT_ROOT}/${document_name}"
+    [[ "$document_name" != README.md ]] || document_source="${PROJECT_ROOT}/docs/CLI.md"
+    [[ "$document_name" != README.zh-CN.md ]] || document_source="${PROJECT_ROOT}/docs/CLI.zh-CN.md"
+    if [[ -f "$document_source" ]]; then
         /bin/mkdir -p "${STAGED_RELEASE}/${document_name:h}"
         /usr/bin/ditto --norsrc --noextattr --noacl \
-            "${PROJECT_ROOT}/${document_name}" "${STAGED_RELEASE}/${document_name}"
+            "$document_source" "${STAGED_RELEASE}/${document_name}"
+        if [[ "$document_name" == README.md || "$document_name" == README.zh-CN.md ]]; then
+            /usr/bin/sed -e 's#src="../assets/#src="assets/#g' \
+                -e 's#](TECHNICAL.md#](docs/TECHNICAL.md#g' \
+                -e 's#](../LICENSE)#](LICENSE)#g' \
+                -e 's#](../CONTRIBUTING.md)#](CONTRIBUTING.md)#g' \
+                "${STAGED_RELEASE}/${document_name}" > "${BUILD_TMP}/guide-copy.tmp"
+            /bin/mv "${BUILD_TMP}/guide-copy.tmp" "${STAGED_RELEASE}/${document_name}"
+        fi
     fi
 done
 /usr/bin/ditto --norsrc --noextattr --noacl \

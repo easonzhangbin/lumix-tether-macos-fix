@@ -182,7 +182,7 @@ INSPECT_ACTION='service --inspect'
 
 run_case version 0 --version
 assert_actions ''
-[[ "$(< "$LAST_OUTPUT")" == 1.0.1 ]] || die 'Unexpected command version.'
+[[ "$(< "$LAST_OUTPUT")" == 1.0.2 ]] || die 'Unexpected command version.'
 run_case check 0 --check
 assert_actions ''
 run_case check_with_restart 0 --check --restart-camera-service

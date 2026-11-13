@@ -2,7 +2,7 @@
 # Recover USB/PTP before launching official Tether in the system language.
 set -euo pipefail
 TASK_DIR="${0:A:h}"
-TOOL_VERSION=1.0.1
+TOOL_VERSION=1.0.2
 CHECK_ONLY=0
 DIAGNOSE_ONLY=0
 RESTART_CAMERA_SERVICE=0

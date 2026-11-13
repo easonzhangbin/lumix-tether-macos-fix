@@ -1,0 +1,318 @@
+{
+  "schema_version": 2,
+  "status": "mixed: End transitions fixture-tested; broader environment/hardware scenarios remain oracle",
+  "cases": [
+    {
+      "id": "running_tether_blocks_automatic_repair",
+      "events": [
+        "tether_seen_capturing_or_unknown",
+        "start",
+        "usb_attach",
+        "inspection_success_one_s1h"
+      ],
+      "forbidden_actions": [
+        "usb_probe",
+        "restart_camera_service",
+        "force_terminate_tether",
+        "request_tether_quit_on_attach_alone"
+      ]
+    },
+    {
+      "id": "quit_deadline_never_forces",
+      "events": [
+        "tether_seen_identity_A",
+        "reconnect",
+        "clock_plus_30_seconds",
+        "same_tether_still_running"
+      ],
+      "required_facts": [
+        "waiting_for_explicit_force_or_user_exit"
+      ],
+      "forbidden_actions": [
+        "force_terminate_tether",
+        "usb_probe"
+      ]
+    },
+    {
+      "id": "pause_invalidates_success",
+      "events": [
+        "start",
+        "inspection_allows_repair",
+        "probe_started_A",
+        "pause",
+        "probe_A_exit_zero"
+      ],
+      "required_facts": [
+        "desired_running_false"
+      ],
+      "forbidden_actions_after_pause": [
+        "launch_tether",
+        "restart_camera_service",
+        "ready_from_probe_A"
+      ]
+    },
+    {
+      "id": "stop_invalidates_delayed_callbacks",
+      "events": [
+        "start",
+        "probe_started_A",
+        "stopToolWithCompletion",
+        "probe_A_exit_zero",
+        "old_inspection_success"
+      ],
+      "required_facts": [
+        "stop_completion_exactly_once"
+      ],
+      "forbidden_actions_after_stop": [
+        "launch_tether",
+        "usb_probe",
+        "restart_camera_service"
+      ]
+    },
+    {
+      "id": "manual_launch_wins",
+      "events": [
+        "start",
+        "inspection_allows_repair",
+        "probe_started_A",
+        "manual_tether_launch",
+        "probe_A_exit_zero"
+      ],
+      "required_facts": [
+        "old_probe_result_invalidated",
+        "in_flight_recovery_allowed_to_finish_within_existing_bound"
+      ],
+      "forbidden_actions_after_manual_launch": [
+        "launch_tether_again",
+        "force_terminate_tether",
+        "restart_camera_service"
+      ]
+    },
+    {
+      "id": "detector_error_is_unknown",
+      "events": [
+        "start",
+        "inspection_malformed_or_timeout"
+      ],
+      "required_facts": [
+        "error_or_unknown"
+      ],
+      "forbidden_facts": [
+        "certified_no_camera",
+        "certified_owner_free",
+        "repair_success"
+      ],
+      "forbidden_actions": [
+        "usb_probe",
+        "restart_camera_service",
+        "launch_tether"
+      ]
+    },
+    {
+      "id": "reused_pid_cannot_be_forced",
+      "events": [
+        "explicit_quit_target_pid_100_start_A",
+        "clock_plus_30_seconds",
+        "pid_100_start_B_seen",
+        "forceRestart"
+      ],
+      "forbidden_actions": [
+        "force_signal_pid_100_using_start_A"
+      ]
+    },
+    {
+      "id": "duplicate_attach_has_single_owner",
+      "events": [
+        "start",
+        "attach_A",
+        "inspection_A_success",
+        "attach_A_duplicate",
+        "inspection_A_success_duplicate"
+      ],
+      "maximum_simultaneous_owned_helpers": 1,
+      "maximum_tether_launches_per_successful_generation": 1
+    },
+    {
+      "id": "interface_generation_changes",
+      "events": [
+        "attach_interface_A",
+        "probe_A_started",
+        "detach_A",
+        "attach_interface_B",
+        "probe_A_exit_zero"
+      ],
+      "forbidden_actions": [
+        "ready_from_probe_A",
+        "launch_tether_from_probe_A"
+      ],
+      "required_facts": [
+        "interface_B_requires_fresh_inspection"
+      ]
+    },
+    {
+      "id": "recovery_failure_is_not_ready",
+      "events": [
+        "start",
+        "probe_exit_23_or_24_or_124",
+        "bounded_retry_failures"
+      ],
+      "required_facts": [
+        "bounded_retry_count",
+        "honest_failure_state"
+      ],
+      "forbidden_actions": [
+        "launch_tether_without_verified_recovery",
+        "force_terminate_tether"
+      ]
+    },
+    {
+      "id": "confirmed_detach_of_managed_tether",
+      "events": [
+        "supervision_enabled",
+        "exact_manager_owned_tether_identity_A",
+        "confirmed_physical_usb_detach"
+      ],
+      "permitted_actions": [
+        "normal_quit_request_to_revalidated_identity_A"
+      ],
+      "forbidden_actions": [
+        "automatic_force_terminate_tether",
+        "new_usb_probe_while_tether_running"
+      ]
+    },
+    {
+      "id": "end_preserves_duplicate_generation",
+      "validation": "passed fake-environment production-transition fixture; no hardware/OS app actions",
+      "events": [
+        "endSession",
+        "normal_quit_target_selected",
+        "endSession_again"
+      ],
+      "required_facts": [
+        "desired_running_false",
+        "generation_unchanged_on_duplicate",
+        "same_pending_quit_target",
+        "one_normal_quit_request"
+      ]
+    },
+    {
+      "id": "end_invalidates_repair_success",
+      "validation": "passed fake-environment production-transition fixture; no hardware/OS app actions",
+      "events": [
+        "production_probe_started",
+        "endSession",
+        "probe_exit_zero"
+      ],
+      "required_facts": [
+        "owned_helper_allowed_to_finish",
+        "no_followup_inspect_service_or_launch",
+        "session_ended_only_after_reliable_absence"
+      ]
+    },
+    {
+      "id": "end_invalidates_service_success",
+      "validation": "passed fake-environment production-transition fixture; no hardware/OS app actions",
+      "events": [
+        "production_service_restart_pending",
+        "endSession",
+        "service_released"
+      ],
+      "required_facts": [
+        "no_new_probe",
+        "desired_running_false"
+      ]
+    },
+    {
+      "id": "end_waits_accepted_launch",
+      "validation": "passed fake-environment production-transition fixture; no hardware/OS app actions",
+      "events": [
+        "launch_pending",
+        "endSession",
+        "old_launch_handoff_success"
+      ],
+      "required_facts": [
+        "owned_identity_retained",
+        "one_normal_quit_request_with_end_purpose",
+        "no_relaunch",
+        "no_running_success_publication"
+      ]
+    },
+    {
+      "id": "cancel_end_during_launch",
+      "validation": "passed fake-environment production-transition fixture; no hardware/OS app actions",
+      "events": [
+        "launch_pending",
+        "endSession",
+        "pause",
+        "old_launch_handoff_success"
+      ],
+      "required_facts": [
+        "desired_running_false",
+        "no_quit_request",
+        "paused_status_retained"
+      ]
+    },
+    {
+      "id": "cancel_end_during_repair",
+      "validation": "passed fake-environment production-transition fixture; no hardware/OS app actions",
+      "events": [
+        "production_probe_started",
+        "endSession",
+        "pause",
+        "probe_exit_zero"
+      ],
+      "required_facts": [
+        "no_followup_work",
+        "session_not_falsely_ended"
+      ]
+    },
+    {
+      "id": "end_unknown_observation",
+      "validation": "passed fake-environment production-transition fixture; no hardware/OS app actions",
+      "events": [
+        "process_observation_invalid",
+        "endSession",
+        "later_reliable_process_absence"
+      ],
+      "required_facts": [
+        "unknown_not_ended_or_absent_before_fresh_observation",
+        "settled_after_reliable_absence"
+      ]
+    },
+    {
+      "id": "end_never_retargets_failed_quit",
+      "validation": "passed fake-environment production-transition fixture; no hardware/OS app actions",
+      "events": [
+        "endSession",
+        "target_verification_failed",
+        "replacement_identity_appears",
+        "advance_end"
+      ],
+      "required_facts": [
+        "normal_quit_attempt_count_one",
+        "manual_attention",
+        "no_relaunch"
+      ]
+    }
+  ],
+  "pure_policy_checks": {
+    "runner": "GuardianPolicyTests.m",
+    "checks": 61,
+    "failures": 0,
+    "scope": "production pure policy functions with explicit freshness clock values; no hardware or process observation"
+  },
+  "end_transition_fixture_checks": {
+    "runner": "GuardianPolicyTests.m",
+    "assertions": 37,
+    "failures": 0,
+    "scope": "real production asynchronous End/Pause methods, repair/service closures, and launch-result handoff with fake environment methods; no production initializer/timer, OS app actions or hardware",
+    "not_tested": [
+      "real NSTask termination handler",
+      "normal quit OS delivery",
+      "successful real Force Quit",
+      "LaunchServices identity validation",
+      "real helper watchdog timing",
+      "camera behavior"
+    ]
+  }
+}
