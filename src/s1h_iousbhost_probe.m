@@ -39,6 +39,16 @@
 #define READ_CAPACITY 65536U
 #define MAX_CONTAINER_LENGTH (16U * 1024U * 1024U)
 
+/* Stable failure stages for the launcher; an open failure alone does not
+ * establish exclusivity or identify the process holding an interface. */
+enum {
+    ProbeNoInterface = 20,
+    ProbeMultipleInterfaces = 21,
+    ProbeOpenFailed = 22,
+    ProbeDrainFailed = 23,
+    ProbeSessionFailed = 24
+};
+
 typedef struct {
     BOOL events;
     BOOL ioBuffer;
@@ -407,7 +417,7 @@ static int probe(ProbeOptions options) {
     if (matches != 1) {
         printf("Expected one matching interface; found %u.\n", matches);
         if (selected) IOObjectRelease(selected);
-        return 1;
+        return matches == 0 ? ProbeNoInterface : ProbeMultipleInterfaces;
     }
 
     NSError *error = nil;
@@ -419,7 +429,7 @@ static int probe(ProbeOptions options) {
     IOObjectRelease(selected);
     if (!interface) {
         show_error("Open native interface (no seizure)", error);
-        return 1;
+        return ProbeOpenFailed;
     }
     const IOUSBInterfaceDescriptor *descriptor = interface.interfaceDescriptor;
     if (!descriptor || descriptor->bInterfaceNumber != 0 ||
@@ -447,7 +457,7 @@ static int probe(ProbeOptions options) {
     }
     if (options.drainInput && !drain_input(interface, in, options.ioBuffer)) {
         [interface destroy];
-        return 1;
+        return ProbeDrainFailed;
     }
     PTPReader *reader = [PTPReader new];
     reader.pipe = in;
@@ -483,7 +493,7 @@ static int probe(ProbeOptions options) {
     printf("Required transaction checks: OpenSession tx0=%s, GetDeviceInfo data+OK tx1=%s, CloseSession tx2=%s\n",
            opened ? "matched" : "failed", infoOK ? "matched" : "failed", closeOK ? "matched" : "failed");
     printf("Native probe result: %s\n", success ? "SUCCESS" : "FAILED");
-    return success ? 0 : 1;
+    return success ? 0 : ProbeSessionFailed;
 }
 
 int main(int argc, const char *argv[]) {

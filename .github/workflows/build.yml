@@ -12,14 +12,19 @@ permissions:
 jobs:
   build:
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7.0.1
-      - name: Compile arm64 helper and assemble scripts
+      - name: Validate build inputs without hardware access
+        run: ./scripts/build.sh --dry-run
+      - name: Compile arm64 USB and guarded service helpers
         run: ./scripts/build.sh
       - name: Verify signatures, architecture and script syntax
         run: ./scripts/self-check.sh
+      - name: Run isolated recovery mocks and pure guard tests
+        run: ./scripts/test-recovery.sh
       - name: Package and verify an independent extraction
-        run: ./scripts/package.sh --version 1.0.0
+        run: ./scripts/package.sh --version 1.0.1
       - uses: actions/upload-artifact@v7.0.2
         with:
           name: LUMIX-Tether-USB-Fix-arm64

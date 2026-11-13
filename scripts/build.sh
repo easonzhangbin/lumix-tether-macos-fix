@@ -13,7 +13,7 @@ usage() {
     cat <<'USAGE'
 Usage: scripts/build.sh [--output-dir DIRECTORY] [--dry-run]
 
-Build an arm64 USB helper and two .command entrypoints. Official LUMIX Tether
+Build arm64 USB/service helpers and four .command entrypoints. Official LUMIX Tether
 2.12 must be installed separately; no Panasonic binaries are copied.
 
 --dry-run validates inputs and tools without compiling or writing the release.
@@ -31,10 +31,11 @@ while (( $# )); do
     esac
 done
 [[ "$(/usr/bin/uname -s)" == Darwin ]] || die 'macOS and Apple developer tools are required.'
-for required_path in src/s1h_iousbhost_probe.m 恢复S1H连接.command README.md README.zh-CN.md LICENSE; do
+for required_path in src/s1h_iousbhost_probe.m src/s1h_camera_service.m 恢复S1H连接.command 重启相机服务并恢复连接.command README.md README.zh-CN.md LICENSE; do
     [[ -f "${PROJECT_ROOT}/${required_path}" ]] || die "Missing ${required_path}."
 done
 /bin/zsh -n "${PROJECT_ROOT}/恢复S1H连接.command"
+/bin/zsh -n "${PROJECT_ROOT}/重启相机服务并恢复连接.command"
 CLANG_PATH="$(/usr/bin/xcrun --find clang)" || die 'Install Xcode or Command Line Tools.'
 SDK_PATH="$(/usr/bin/xcrun --sdk macosx --show-sdk-path)" || die 'The macOS SDK is unavailable.'
 [[ -x "$CLANG_PATH" ]] || die 'clang is unavailable.'
@@ -54,6 +55,12 @@ STAGED_RELEASE="${BUILD_TMP}/${RELEASE_NAME}"
     -framework Foundation -framework IOKit -framework IOUSBHost \
     -o "${STAGED_RELEASE}/bin/s1h_iousbhost_probe"
 /usr/bin/codesign --force --sign - --timestamp=none "${STAGED_RELEASE}/bin/s1h_iousbhost_probe"
+"$CLANG_PATH" -arch arm64 -mmacosx-version-min=12.0 -fobjc-arc -fblocks \
+    -Wall -Wextra -Werror -O2 -isysroot "$SDK_PATH" \
+    "${PROJECT_ROOT}/src/s1h_camera_service.m" \
+    -framework Foundation -framework IOKit \
+    -o "${STAGED_RELEASE}/bin/s1h_camera_service"
+/usr/bin/codesign --force --sign - --timestamp=none "${STAGED_RELEASE}/bin/s1h_camera_service"
 for document_name in README.md README.zh-CN.md LICENSE CONTRIBUTING.md docs/TECHNICAL.md assets/alipay-donate.jpg; do
     if [[ -f "${PROJECT_ROOT}/${document_name}" ]]; then
         /bin/mkdir -p "${STAGED_RELEASE}/${document_name:h}"
@@ -66,7 +73,12 @@ done
 # Same source, ordinary file: no symlink and no dependency on shell wrappers.
 /usr/bin/ditto --norsrc --noextattr --noacl \
     "${PROJECT_ROOT}/恢复S1H连接.command" "${STAGED_RELEASE}/Restore S1H Connection.command"
-/bin/chmod 755 "${STAGED_RELEASE}/恢复S1H连接.command" "${STAGED_RELEASE}/Restore S1H Connection.command"
+/usr/bin/ditto --norsrc --noextattr --noacl \
+    "${PROJECT_ROOT}/重启相机服务并恢复连接.command" "${STAGED_RELEASE}/重启相机服务并恢复连接.command"
+/usr/bin/ditto --norsrc --noextattr --noacl \
+    "${PROJECT_ROOT}/重启相机服务并恢复连接.command" "${STAGED_RELEASE}/Restart Camera Service and Restore.command"
+/bin/chmod 755 "${STAGED_RELEASE}/恢复S1H连接.command" "${STAGED_RELEASE}/Restore S1H Connection.command" \
+    "${STAGED_RELEASE}/重启相机服务并恢复连接.command" "${STAGED_RELEASE}/Restart Camera Service and Restore.command"
 "${SCRIPT_DIR}/self-check.sh" "$STAGED_RELEASE"
 /bin/mkdir -p "$OUTPUT_DIR"
 FINAL_RELEASE="${OUTPUT_DIR}/${RELEASE_NAME}"

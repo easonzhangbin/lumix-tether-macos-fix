@@ -6,7 +6,7 @@ SCRIPT_DIR="${0:A:h}"
 PROJECT_ROOT="${SCRIPT_DIR:h}"
 RELEASE_NAME='LUMIX Tether USB Fix'
 OUTPUT_DIR="${PROJECT_ROOT}/dist"
-RELEASE_VERSION='1.0.0'
+RELEASE_VERSION='1.0.1'
 PACKAGE_TMP=''
 DRY_RUN=0
 die() { print -u2 -r -- "Packaging failed: $*"; exit 1; }
@@ -41,7 +41,8 @@ trap '[[ -z "$PACKAGE_TMP" ]] || /bin/rm -rf -- "$PACKAGE_TMP"' EXIT
 STAGED_RELEASE="${PACKAGE_TMP}/${RELEASE_NAME}"
 /bin/mkdir -p "$STAGED_RELEASE"
 typeset -a ALLOWED_FILES
-ALLOWED_FILES=(bin/s1h_iousbhost_probe 恢复S1H连接.command 'Restore S1H Connection.command'
+ALLOWED_FILES=(bin/s1h_iousbhost_probe bin/s1h_camera_service 恢复S1H连接.command 'Restore S1H Connection.command'
+               重启相机服务并恢复连接.command 'Restart Camera Service and Restore.command'
                README.md README.zh-CN.md LICENSE CONTRIBUTING.md docs/TECHNICAL.md assets/alipay-donate.jpg)
 for relative_path in "${ALLOWED_FILES[@]}"; do
     if [[ -f "${RELEASE_PATH}/${relative_path}" ]]; then

@@ -51,6 +51,18 @@ body:
       label: Fix release or commit / 修复工具版本或提交
     validations:
       required: true
+  - type: dropdown
+    id: recovery_mode
+    attributes:
+      label: Entry point or mode used / 使用的入口或模式
+      options:
+        - "Normal recovery script (default) / 普通恢复脚本（默认）"
+        - "Read-only --diagnose / 只读 --diagnose"
+        - "Restart Camera Service and Restore / 重启相机服务并恢复连接"
+        - "Explicit --restart-camera-service / 明确指定 --restart-camera-service"
+        - "Other or uncertain / 其他或不确定"
+    validations:
+      required: true
   - type: textarea
     id: usb
     attributes:
@@ -59,11 +71,32 @@ body:
     validations:
       required: true
   - type: dropdown
+    id: recurrence
+    attributes:
+      label: When did it fail? / 何时失败？
+      options:
+        - "First connection; it has never worked / 首次连接，尚未成功过"
+        - "After USB unplug/reconnect following a successful session / 成功连接后，USB 拔插重连时复发"
+        - "At a later Tether launch without reconnecting / 未重新插线，之后启动 Tether 时失败"
+        - "Other or uncertain / 其他或不确定"
+    validations:
+      required: true
+  - type: textarea
+    id: camera_clients
+    attributes:
+      label: Camera clients and service ownership / 相机客户端与服务占用
+      description: List camera/import apps and whether they were fully quit, not hidden. Add short redacted owner or restart-guard refusal lines if available. Mention Preview only as an observation, not an assumed cause. / 说明相机或导入软件是否已正常退出，而非只隐藏窗口。可提供脱敏后的简短占用者或重启守卫拒绝信息，不能仅凭“预览”曾运行就假定根因。
+    validations:
+      required: true
+  - type: dropdown
     id: stage
     attributes:
       label: Furthest verified stage / 已验证到的步骤
       options:
         - "No camera detected / 未检测到相机"
+        - "Service-restart guard refused; no USB probe ran / 服务重启守卫拒绝，未运行 USB 探针"
+        - "Interface busy; drain could not start / 接口被占用，尚未开始排空"
+        - "Interface opened; drain or new PTP command failed / 接口已打开，排空或新的 PTP 命令失败"
         - "Camera detected; recovery failed / 检测到相机但恢复失败"
         - "Fresh handshake passed; Tether did not connect / 新握手通过但 Tether 未连接"
         - "Tether connected; no live view / Tether 已连接但没有实时预览"
@@ -75,16 +108,17 @@ body:
     id: reproduce
     attributes:
       label: Steps, expected result and actual result / 复现步骤、预期与实际结果
+      description: Include the order of app exit, USB reconnection, recovery-script launch and Tether launch; state whether you launched Tether through the script. / 请按顺序说明退出应用、USB 重连、运行恢复脚本和启动 Tether 的步骤，并说明是否从脚本启动 Tether。
     validations:
       required: true
   - type: textarea
     id: log_excerpt
     attributes:
       label: Relevant redacted status/error lines / 相关脱敏状态或错误行
-      description: Headers, lengths and status codes only. Do not paste a full crash report or capture. / 仅提供协议头、长度和状态码，不要粘贴完整崩溃报告或抓包。
+      description: Include only relevant headers, lengths, status codes and redacted ownership/guard results. Do not paste a full crash report, capture or log with private paths. / 仅提供相关协议头、长度、状态码及脱敏后的占用或守卫结果，不要粘贴完整崩溃报告、抓包或含私人路径的完整日志。
       render: text
   - type: textarea
     id: additional
     attributes:
       label: Additional observations / 其他观察
-      description: Note reconnect behavior or results on a different OS; do not infer support solely from a USB ID. / 可说明重连或其他系统上的结果，不要仅凭 USB ID 推断兼容性。
+      description: Note whether recovery had worked before and any different-OS result. A previous success does not establish a permanent fix; a USB ID alone does not establish model support. / 可说明此前是否成功恢复及其他系统上的结果。一次成功不等于永久修复，不能仅凭 USB ID 推断机型兼容性。
