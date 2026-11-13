@@ -1,0 +1,90 @@
+name: Bug report / 故障报告
+description: Report a connection problem or an untested camera configuration. / 报告连接故障或未验证机型。
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please provide a minimal, redacted report. Do not post camera serial numbers, image payloads, full USB captures, or unredacted full crash reports.
+        请只提交必要的脱敏信息，不要上传相机序列号、图像内容、完整 USB 抓包或未脱敏的完整崩溃报告。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before reporting / 提交前确认
+      options:
+        - label: I checked the actual Tether version and am using official 2.12, not an old 2.11 shortcut. / 已确认实际使用官方 2.12，而非旧 2.11 快捷方式。
+          required: true
+        - label: I removed serial numbers, private paths, images and other private identifiers from the report. / 已删除序列号、私人路径、图像及其他私人标识。
+          required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera model and firmware / 相机型号与固件
+      placeholder: "DC-S1H, firmware version … / 固件版本 …"
+    validations:
+      required: true
+  - type: input
+    id: mac
+    attributes:
+      label: Mac model or chip / Mac 型号或芯片
+      placeholder: "MacBookPro18,2 / Apple M1 Max"
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and build / macOS 版本与构建号
+      placeholder: "27.0.1 (26A434)"
+    validations:
+      required: true
+  - type: input
+    id: tether
+    attributes:
+      label: Tether version and build / Tether 版本与构建号
+      placeholder: "2.12 / 2.12.0.5"
+    validations:
+      required: true
+  - type: input
+    id: fix_version
+    attributes:
+      label: Fix release or commit / 修复工具版本或提交
+    validations:
+      required: true
+  - type: textarea
+    id: usb
+    attributes:
+      label: USB connection / USB 连接情况
+      description: Cable, direct connection or hub, negotiated speed if known, and camera USB mode. / 数据线、直连或集线器、已知协商速率及相机 USB 模式。
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Furthest verified stage / 已验证到的步骤
+      options:
+        - "No camera detected / 未检测到相机"
+        - "Camera detected; recovery failed / 检测到相机但恢复失败"
+        - "Fresh handshake passed; Tether did not connect / 新握手通过但 Tether 未连接"
+        - "Tether connected; no live view / Tether 已连接但没有实时预览"
+        - "Live view appeared; a later issue occurred / 已出现实时预览，之后出现故障"
+        - "Other / 其他"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps, expected result and actual result / 复现步骤、预期与实际结果
+    validations:
+      required: true
+  - type: textarea
+    id: log_excerpt
+    attributes:
+      label: Relevant redacted status/error lines / 相关脱敏状态或错误行
+      description: Headers, lengths and status codes only. Do not paste a full crash report or capture. / 仅提供协议头、长度和状态码，不要粘贴完整崩溃报告或抓包。
+      render: text
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional observations / 其他观察
+      description: Note reconnect behavior or results on a different OS; do not infer support solely from a USB ID. / 可说明重连或其他系统上的结果，不要仅凭 USB ID 推断兼容性。

@@ -1,0 +1,29 @@
+name: Build and validate release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Compile arm64 helper and assemble scripts
+        run: ./scripts/build.sh
+      - name: Verify signatures, architecture and script syntax
+        run: ./scripts/self-check.sh
+      - name: Package and verify an independent extraction
+        run: ./scripts/package.sh --version 1.0.0
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: LUMIX-Tether-USB-Fix-arm64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          retention-days: 14

@@ -1,0 +1,16 @@
+.DS_Store
+._*
+build/
+dist/
+release/
+*.app/
+*.pkg
+*.zip
+*.dmg
+*.pcap
+*.pcapng
+*.log
+*.dSYM/
+vendor/
+.env
+.env.*
