@@ -269,16 +269,29 @@ static void inspect_owner(io_registry_entry_t interface, ServiceSnapshot *snapsh
     snapshot.ownerState = owner_evidence_state(snapshot.ownerLabel, creatorPIDs, unreadableCreator);
 }
 
+/* IOServiceGetMatchingServices explicitly permits KERN_SUCCESS with a NULL
+ * iterator when no services match (IOKitLib.h). NULL is not an invalidated
+ * iterator in that API's result. Every non-NULL matching iterator must still
+ * pass the native validity check after exhaustion. The injected callback
+ * keeps this distinction testable without touching IORegistry. This rule is
+ * deliberately not applied to IORegistryEntryCreateIterator. */
+static BOOL matching_iteration_complete(kern_return_t status, io_iterator_t iterator,
+                                        BOOL (^isValid)(io_iterator_t)) {
+    if (status != KERN_SUCCESS) return NO;
+    if (iterator == IO_OBJECT_NULL) return YES;
+    return isValid ? isValid(iterator) : NO;
+}
+
 static void inspect_registry(ServiceSnapshot *snapshot) {
     CFMutableDictionaryRef match = IOServiceMatching("IOUSBHostDevice");
     if (!match) { snapshot.inspectionError = @"Could not create the S1H registry query."; return; }
     CFDictionarySetValue(match, CFSTR("idVendor"), (__bridge CFNumberRef)@0x04da);
     CFDictionarySetValue(match, CFSTR("idProduct"), (__bridge CFNumberRef)@0x2382);
     io_iterator_t devices = IO_OBJECT_NULL;
-    kern_return_t kr = IOServiceGetMatchingServices(kIOMainPortDefault, match, &devices);
-    if (kr != KERN_SUCCESS) { snapshot.inspectionError = @"Could not enumerate S1H registry entries."; return; }
+    kern_return_t deviceMatchStatus = IOServiceGetMatchingServices(kIOMainPortDefault, match, &devices);
+    if (deviceMatchStatus != KERN_SUCCESS) { snapshot.inspectionError = @"Could not enumerate S1H registry entries."; return; }
     io_registry_entry_t device;
-    while ((device = IOIteratorNext(devices))) {
+    while (devices != IO_OBJECT_NULL && (device = IOIteratorNext(devices))) {
         ++snapshot.deviceCount;
         if (snapshot.deviceCount == 1) {
             NSString *name = registry_string(device, CFSTR("USB Product Name"));
@@ -288,7 +301,7 @@ static void inspect_registry(ServiceSnapshot *snapshot) {
             snapshot.usbLinkSpeed = registry_number(device, CFSTR("UsbLinkSpeed"), 0);
         }
         io_iterator_t entries = IO_OBJECT_NULL;
-        kr = IORegistryEntryCreateIterator(device, kIOServicePlane, kIORegistryIterateRecursively, &entries);
+        kern_return_t kr = IORegistryEntryCreateIterator(device, kIOServicePlane, kIORegistryIterateRecursively, &entries);
         if (kr != KERN_SUCCESS) snapshot.inspectionError = @"Could not inspect the S1H interface registry.";
         else {
             io_registry_entry_t entry;
@@ -306,19 +319,19 @@ static void inspect_registry(ServiceSnapshot *snapshot) {
         }
         IOObjectRelease(device);
     }
-    if (!IOIteratorIsValid(devices))
+    if (!matching_iteration_complete(deviceMatchStatus, devices, ^BOOL(io_iterator_t iterator) { return IOIteratorIsValid(iterator); }))
         snapshot.inspectionError = @"The matching device registry changed during inspection.";
-    IOObjectRelease(devices);
+    if (devices != IO_OBJECT_NULL) IOObjectRelease(devices);
     if (snapshot.deviceCount == 0) snapshot.ownerState = @"none";
 
     /* Only other still-image (06/01/01) interfaces matter. Do not refuse for
      * arbitrary USB hubs, keyboards, tablets, or browser device-level opens. */
     io_iterator_t interfaces = IO_OBJECT_NULL;
-    kr = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOUSBHostInterface"), &interfaces);
+    kern_return_t kr = IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOUSBHostInterface"), &interfaces);
     if (kr != KERN_SUCCESS) { snapshot.inspectionError = @"Could not check other USB/PTP interfaces."; return; }
     NSMutableArray *others = [NSMutableArray array];
     io_registry_entry_t interface;
-    while ((interface = IOIteratorNext(interfaces))) {
+    while (interfaces != IO_OBJECT_NULL && (interface = IOIteratorNext(interfaces))) {
         uint64_t registryID = 0;
         IORegistryEntryGetRegistryEntryID(interface, &registryID);
         if (is_still_image_interface(interface) && registryID != snapshot.interfaceID) {
@@ -328,9 +341,9 @@ static void inspect_registry(ServiceSnapshot *snapshot) {
         }
         IOObjectRelease(interface);
     }
-    if (!IOIteratorIsValid(interfaces))
+    if (!matching_iteration_complete(kr, interfaces, ^BOOL(io_iterator_t iterator) { return IOIteratorIsValid(iterator); }))
         snapshot.inspectionError = @"The USB/PTP interface registry changed during inspection.";
-    IOObjectRelease(interfaces);
+    if (interfaces != IO_OBJECT_NULL) IOObjectRelease(interfaces);
     snapshot.otherPTPInterfaces = others;
 }
 
@@ -622,6 +635,40 @@ static int self_test(void) {
         if (!passed) ++failures;
         printf("%s %s\n", passed ? "PASS" : "FAIL", name.UTF8String);
     };
+    __block unsigned validityCalls = 0;
+    const io_iterator_t fixtureIterator = (io_iterator_t)12345;
+    BOOL (^validIterator)(io_iterator_t) = ^BOOL(io_iterator_t iterator) {
+        ++validityCalls;
+        return iterator == fixtureIterator;
+    };
+    check(matching_iteration_complete(KERN_SUCCESS, IO_OBJECT_NULL, validIterator) && validityCalls == 0,
+          @"Successful NULL matching result is empty and never queries iterator validity");
+    check(!matching_iteration_complete(KERN_FAILURE, IO_OBJECT_NULL, validIterator) && validityCalls == 0,
+          @"Failed matching request with NULL is an error, not a successful empty result");
+    check(!matching_iteration_complete(KERN_FAILURE, fixtureIterator, validIterator) && validityCalls == 0,
+          @"Failed matching request cannot be accepted even with a non-NULL handle");
+    check(matching_iteration_complete(KERN_SUCCESS, fixtureIterator, validIterator) && validityCalls == 1,
+          @"Non-NULL exhausted matching iterator requires and passes its injected validity check");
+    check(!matching_iteration_complete(KERN_SUCCESS, fixtureIterator, ^BOOL(io_iterator_t iterator) {
+        ++validityCalls;
+        return iterator != fixtureIterator;
+    }) && validityCalls == 2,
+          @"A genuinely invalidated non-NULL matching iterator remains an error");
+    check(!matching_iteration_complete(KERN_SUCCESS, fixtureIterator, nil),
+          @"A non-NULL iterator without validity evidence fails closed");
+
+    FakeServiceEnvironment *emptyMatch = fake_environment();
+    emptyMatch.snapshot.deviceCount = 0; emptyMatch.snapshot.interfaceCount = 0;
+    emptyMatch.snapshot.ownerState = @"none"; emptyMatch.snapshot.deviceModelState = @"unknown";
+    if (!matching_iteration_complete(KERN_SUCCESS, IO_OBJECT_NULL, validIterator))
+        emptyMatch.snapshot.inspectionError = @"Matching enumeration incomplete";
+    check([restart_service(emptyMatch)[@"status"] isEqual:@"not_needed"] && emptyMatch.signalCount == 0 && validityCalls == 2,
+          @"Normalized empty matching inventory reports no owner and sends no service signal");
+    FakeServiceEnvironment *invalidMatch = fake_environment();
+    if (!matching_iteration_complete(KERN_SUCCESS, fixtureIterator, ^BOOL(io_iterator_t iterator) { (void)iterator; return NO; }))
+        invalidMatch.snapshot.inspectionError = @"Matching iterator invalidated";
+    check([restart_service(invalidMatch)[@"reason"] isEqual:@"inspection_error"] && invalidMatch.signalCount == 0,
+          @"Normalized invalidated matching inventory refuses service restart without signals");
     FakeServiceEnvironment *e = fake_environment();
     check([guard_reason(e.snapshot) isEqualToString:@"opt_in_required"], @"Verified ownership still requires explicit opt-in");
     for (NSString *name in @[@"LUMIX Tether", @"Preview", @"Image Capture", @"Photos", @"Capture One", @"Adobe Lightroom Classic", @"gphoto2", @"PTPCamera", @"s1h_iousbhost_probe"]) {

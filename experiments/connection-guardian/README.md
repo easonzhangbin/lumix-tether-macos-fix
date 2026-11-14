@@ -4,11 +4,19 @@
 
 A menu-bar connection supervisor for DC-S1H. Separately installed official LUMIX Tether 2.12 retains shooting, exposure controls, white balance and original-file saving. This utility prepares the connection, monitors USB changes and coordinates application restarts.
 
-This is **Guardian 0.2.2 community beta**, published as [guardian-v0.2.2](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.2). A previous single Guardian recovery handoff was followed by official Tether preview and a saved 6000×4000 RAW (36,048,384 bytes). Aperture, shutter, ISO and color-temperature controls were verified separately in the official UI. These short checks do not establish repeated hot-plug, sleep/wake or long-duration reliability.
+This is **Guardian 0.2.3 community beta**, published as [guardian-v0.2.3](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.3). A previous single Guardian recovery handoff was followed by official Tether preview and a saved 6000×4000 RAW (36,048,384 bytes). Aperture, shutter, ISO and color-temperature controls were verified separately in the official UI. These short checks do not establish repeated hot-plug, sleep/wake or long-duration reliability.
 
-The app provides End This Shoot and separates USB detection, the Tether process and the shooting-connection state. Version 0.2.2 adds bounded local event logs for troubleshooting. Confirm shooting inside Tether: a present USB device, recorded interface owner or running process never establishes that capture is working.
+The app provides End This Shoot and separates USB detection, the Tether process and the shooting-connection state. Local rotating event logs support troubleshooting. Confirm shooting inside Tether: a present USB device, recorded interface owner or running process never establishes that capture is working.
 
-## 0.2.2 correction
+## 0.2.3 correction
+
+The service helper now accepts a successful `IOServiceGetMatchingServices` result with a NULL iterator as no matching services. Only its two matching-service enumeration checks changed: actual API failures and invalid non-NULL iterators still fail closed, and recursive registry validation is unchanged. The service self-tests increased from 43 to 51; the complete hardware-free build passed **310 checks: 16 identity, 51 service guard, 50 event writer and 193 controller/policy**.
+
+From the observed exit of the old Tether process to the verified new launch, the measured interval was 3.852 seconds on 0.2.2 and 3.877 seconds on the installed 0.2.3 build. Official live view was confirmed afterward; these intervals do not measure time to live view. **On the tested setup, the physical USB test—unplug, wait five seconds, reconnect—failed on both versions.** The camera remained on “Please wait”, could not switch off normally and needed a battery power reset each time. On 0.2.3, Tether exited normally 0.968 seconds after detected detach, but the camera did not re-enumerate; no subsequent repair or launch ran. The corrected read-only inspection returned exit zero, zero devices and no error. That confirms the empty-enumeration correction, not a cure for the camera lockup. Its cause remains unproven, and Guardian cannot run its USB/PTP recovery while the camera is not enumerated.
+
+Recommended sequence: finish shooting and transfers → End This Shoot → confirm Tether has exited → disconnect USB. This sequence has not yet been hardware-retested in this round. If the camera is stuck, pause Guardian; after confirming no write activity, disconnect USB and try normal OFF, using a battery power reset if shutdown remains impossible. General hot-plug, sleep/wake and long-duration reliability are not established.
+
+### Earlier 0.2.2 correction
 
 A separate pre-recovery check names detected camera clients such as Preview, without claiming they actually own the interface. The actual owner is shown separately. Checking and opening Tether now uses the preparation chain while Tether is absent; blocked and unblocked states are recorded locally.
 
@@ -22,6 +30,17 @@ A separate pre-recovery check names detected camera clients such as Preview, wit
 6. To leave Tether open while stopping automatic recovery, choose Pause Recovery. Quitting Guardian also leaves Tether alone; any active bounded preparation finishes its cleanup first.
 
 The app does not install a login item, system service or LaunchAgent. Its Chinese/English interface follows the preferred system language. It uses Tether's existing language argument when launching that application.
+
+## Troubleshooting order
+
+1. **Stop capture and wait for file transfer to finish.** Keep the USB data cable connected, the camera powered on and **PC(Tether)** selected. Check Guardian’s status.
+2. **Quit applications named by Recovery Check normally.** Save pending edits first, then quit Preview, Image Capture or another listed camera client. A running application is not proof that it owns the camera.
+3. **USB detected, but Tether waiting for a camera:** open Guardian’s menu-bar item → **Reconnect (Quit Tether Normally)**. Wait for the old Tether to exit and for Guardian to prepare the connection and launch a new window. Start Guardian alone does not restart an existing Tether. Do not open Tether separately from Dock/Finder during preparation.
+4. **Tether is absent:** launch it through Guardian’s **Check Connection and Open Tether** (also ⌘O), then wait for preparation. Once the official camera list shows DC-S1H, click **Start**, then **LV**, and verify an image. USB presence and a running process alone do not establish shooting readiness.
+5. **Camera not detected:** check power, PC(Tether) and the data cable. **If it is stuck on “Please wait” and normal OFF fails:** pause Guardian → disconnect USB → confirm there is no recording or card write → set OFF and remove the battery for about 10 seconds → reinstall it and power on. Once normal operation returns, reconnect USB, select PC(Tether) and return to step 4. Guardian cannot send USB/PTP recovery to a camera that has not enumerated again.
+6. **If it still fails, stop repeated hot-plug attempts.** Check Recovery Check and Show Diagnostics and Logs Folder, and retain the failure time. A quit timeout does not prove the camera is idle; do not force-quit during file transfer.
+
+Recommended shutdown order: **finish transfer → End This Shoot → confirm Tether exited → disconnect USB.** This order has not been hardware-retested in this round. The five-second unplug/reconnect during live view failed on the tested setup; automatic recovery is not guaranteed.
 
 ## Scope
 

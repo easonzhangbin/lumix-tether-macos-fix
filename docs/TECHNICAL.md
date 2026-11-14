@@ -2,9 +2,9 @@
 
 ## Scope / 范围
 
-This document records one recovered configuration, not a universal diagnosis for macOS or LUMIX cameras. The public tool consists of `.command` scripts and native USB-recovery and ownership helpers in the same release folder.
+This document records one recovered configuration, not a universal diagnosis for macOS or LUMIX cameras. The repository includes the Connection Guardian menu-bar beta and the earlier `.command` recovery tools, using native USB-recovery and ownership helpers.
 
-本说明记录一套已恢复的环境，不代表对所有 macOS 或 LUMIX 机型的通用诊断。公开工具由同一个发布目录内的 `.command` 脚本、原生 USB 恢复程序及占用诊断程序组成。
+本说明记录一套已恢复的环境，不代表对所有 macOS 或 LUMIX 机型的通用诊断。仓库包含 Connection Guardian 菜单栏测试版及早期 `.command` 恢复工具，使用原生 USB 恢复及占用诊断辅助程序。
 
 | Component / 项目 | Observed / 实测 |
 | --- | --- |
@@ -217,7 +217,7 @@ The smallest candidate for retaining official Tether's UI is a stop/quit lifecyc
 
 ## Connection Guardian beta / 连接守护测试版
 
-Guardian 0.2.1 is the menu-bar beta described in the [project introduction](../README.md), with [source and usage](../experiments/connection-guardian/README.md). It retains the unmodified official Tether 2.12 UI for shooting, controls and original-file saving.
+Guardian 0.2.3 is the menu-bar beta described in the [project introduction](../README.md), with [source and usage](../experiments/connection-guardian/README.md). It retains the unmodified official Tether 2.12 UI for shooting, controls and original-file saving.
 
 Start explicitly enables bounded connection preparation while Tether is absent, including guarded current-user camera-service recovery when permitted. While Tether is known to be running, no new USB/PTP repair is started. Confirmed physical detach may request a normal quit only of the exact verified Tether instance Guardian launched. Reconnect also requests normal quit. Thirty seconds without exit enables a separate explicit force action; it never automatically forces Tether to quit.
 
@@ -225,11 +225,11 @@ End This Shoot disables recovery before waiting for an owned helper/launch to se
 
 The app uses local rotating JSONL event logs with timestamps, run/request IDs, action requests, outcomes and process-observation edges. Guardian launch requests and returned applications are distinct events; externally observed processes retain unknown origin. A returned app does not prove the request created that process. Event fields are restricted metadata; raw diagnostics and photographs are excluded from public artifacts.
 
-Build validation passed 236 hardware-free checks: 16 USB identity, 43 service guard, 49 event writer and 128 controller/policy tests. Controller fixtures exercise the actual asynchronous End/late callback paths with fake helper/process boundaries. Logger tests cover ordering, rotation, permissions and unsafe-file refusal. These checks do not prove real OS force-quit delivery, hot-plug or sleep/wake reliability.
+Current 0.2.3 build validation passed 310 hardware-free checks: 16 USB identity, 51 service guard, 50 event writer and 193 controller/policy tests. Controller fixtures exercise the actual asynchronous End/late callback paths with fake helper/process boundaries. Logger tests cover ordering, rotation, permissions and unsafe-file refusal. These checks do not prove real OS force-quit delivery, hot-plug or sleep/wake reliability. The failed 0.2.2/0.2.3 hot-plug observations are recorded below.
 
 A short Guardian recovery handoff was followed by actual official Tether preview and capture/save of one 6000×4000 RAW, 36,048,384 bytes. Pause retained the official process. End closed Tether normally; a six-second observation saw no automatic reopen. Long-duration work, repeated Guardian USB reconnects, sleep/wake and other hardware remain unverified.
 
-Guardian 0.2.1 是[项目介绍](../README.zh-CN.md)中的菜单栏测试版，[源码及用法](../experiments/connection-guardian/README.zh-CN.md)保持与其一致。拍摄、参数控制及原片保存由未修改的官方 Tether 2.12 完成。
+Guardian 0.2.3 是[项目介绍](../README.zh-CN.md)中的菜单栏测试版，[源码及用法](../experiments/connection-guardian/README.zh-CN.md)保持与其一致。拍摄、参数控制及原片保存由未修改的官方 Tether 2.12 完成。
 
 明确开始后，才在 Tether 未运行时进行有上限的连接准备，并在守卫允许时处理本用户的相机服务占用。已知 Tether 运行时不开始新的 USB／PTP 恢复。确认物理断开后，只可请求 Guardian 启动且身份仍一致的 Tether 正常退出；重新连接也先请求正常退出。30 秒未退出仅启用单独的明确强制操作，不会自动强杀。
 
@@ -237,7 +237,7 @@ Guardian 0.2.1 是[项目介绍](../README.zh-CN.md)中的菜单栏测试版，[
 
 本地 JSONL 事件日志记录时间、运行／请求编号、操作、结果和进程变化。守护器的启动请求与系统返回的应用分开记录；外部观察进程的来源保留未知，返回应用不等于已经证明该请求创建了进程。事件仅含受限制的元数据，公开产物不含原始诊断或照片。
 
-236 项无硬件检查通过：设备身份 16、服务守卫 43、事件日志 49、控制器／策略 128。控制器使用模拟辅助程序和进程边界测试真实异步结束及迟到回调；日志测试覆盖顺序、轮转、权限及不安全目标拒绝。这些不能证明真实系统强制退出、拔插或睡眠唤醒可靠性。
+当前 0.2.3 构建的 310 项无硬件检查通过：设备身份 16、服务守卫 51、事件日志 50、控制器／策略 193。控制器使用模拟辅助程序和进程边界测试真实异步结束及迟到回调；日志测试覆盖顺序、轮转、权限及不安全目标拒绝。这些不能证明真实系统强制退出、拔插或睡眠唤醒可靠性。0.2.2／0.2.3 拔插失败的实测记录见下文。
 
 一次短测中，Guardian 恢复交接后，官方 Tether 预览正常，并拍摄保存一张 6000×4000 RAW（36,048,384 字节）。暂停保留了原厂进程；结束拍摄正常关闭 Tether，随后 6 秒未观察到自动重开。长时间拍摄、Guardian 反复拔插、睡眠唤醒及其他硬件仍待验证。
 
@@ -308,3 +308,25 @@ Version 0.2.2 makes all Guardian launch entries use fresh preparation while Teth
 后续复发中，Tether两次正常退出后，在“预览”被检测为运行时没有执行新的恢复；直接打开入口随后绕过了准备。登记的接口占用者是系统相机服务，“预览”运行只是保守拦截，不能证明它占用了USB。正常退出“预览”后，排队的恢复完成服务释放及严格PTP检查，官方实时画面恢复。
 
 0.2.2 将 Tether 未运行时的启动入口统一到新的准备流程，分开显示客户端检查与接口占用者，并记录阻塞和解除。恢复成功后出现相机客户端时保留任务，不消耗 I/O 重试预算。新版打开入口的实机复测确认：“预览”运行时保持等待，正常退出后完成严格恢复并重新显示官方实时画面。完整无硬件验证共 302 项：身份 16、服务 43、事件 50、控制器 193；不能据此保证普遍拔插或睡眠唤醒可靠性。
+
+## 0.2.3 empty enumeration correction; USB hot-plug still fails / 空枚举修正，USB 热插拔仍失败
+
+On 0.2.2, the interval from observing the old Tether process exit to the verified new launch was 3.852 seconds. Actual official live view was confirmed afterward. A subsequent USB unplug, five-second wait and reconnect failed: the S1H remained on “Please wait”, could not switch off normally and required removing and reinserting its battery. The host had no enumerated S1H. A read-only API reproduction returned success (`kr = 0`), a NULL matching iterator and zero services; the old helper misclassified that empty success as iterator invalidation.
+
+Apple's [IOKit header documentation](https://github.com/apple-oss-distributions/IOKitUser/blob/main/IOKitLib.h) defines a successful NULL result from `IOServiceGetMatchingServices` as no matching services. Version 0.2.3 changes only the service helper's two matching-service enumeration checks. API errors still fail closed; non-NULL iterators must still pass their validity check. Recursive registry traversal validation is unchanged. Eight added service tests raise that suite from 43 to 51; the complete hardware-free build passes 310 checks (16 + 51 + 50 + 193).
+
+The installed 0.2.3 build (bundle version 5) verified a new Tether launch 3.877 seconds after the old process exit was observed. Camera recognition and actual live view were confirmed afterward; 3.877 seconds does not measure time to live view. **The same five-second USB hot-plug test then failed again.** Guardian recorded detach and delivered normal quit; Tether exited 0.968 seconds after detach. No camera re-enumeration, repair helper or Tether relaunch followed. Read-only inspection correctly returned exit zero, zero devices and no inspection error. Guardian was paused, and the camera again required a battery power reset.
+
+The empty-enumeration fix is therefore verified independently of the remaining camera lockup. Neither its cause nor a permanent hot-plug cure has been established. Guardian cannot run USB/PTP recovery without an enumerated camera. Recommended workflow is capture/transfers complete → End This Shoot → confirm Tether exit → disconnect USB; that sequence has not yet been hardware-retested in this round. For a stuck camera, pause Guardian and, after confirming no write activity, disconnect USB and attempt normal OFF before a necessary battery power reset. These observations do not establish sleep/wake, long-duration or other-model reliability.
+
+0.2.2 中，从观察到旧 Tether 进程退出至核实新启动耗时 3.852 秒，之后另行确认实际官方预览通过。但随后拔下 USB、等待五秒并重连失败：S1H 停在“Please wait”，无法正常关机，需取出并重新装入电池复位；主机实际没有枚举到 S1H。只读 API 复现得到成功返回（`kr = 0`）、NULL 匹配迭代器及零服务，旧辅助程序却将空结果误判为迭代器失效。
+
+Apple 的 [IOKit 头文件说明](https://github.com/apple-oss-distributions/IOKitUser/blob/main/IOKitLib.h)规定，`IOServiceGetMatchingServices` 成功返回 NULL 表示没有匹配服务。0.2.3 仅改动服务辅助程序的两处匹配枚举检查：API 错误仍拒绝继续，非 NULL 迭代器仍需通过有效性检查，递归注册表遍历校验未放宽。新增八项服务测试，服务套件从 43 增至 51；完整无硬件构建检查共 310 项（16 + 51 + 50 + 193）通过。
+
+已安装的 0.2.3（bundle version 5）从观察到旧进程退出至核实新 Tether 启动耗时 3.877 秒。之后另行确认相机识别及实际实时预览；3.877 秒并非恢复到预览的耗时。**随后相同五秒 USB 拔插测试仍失败。** Guardian 记录断开并送达正常退出请求；断开后 0.968 秒 Tether 已退出，但相机没有重新枚举，也未继续执行恢复辅助程序或重新启动 Tether。只读检查正确返回退出码零、零设备及无检查错误。守护随后暂停，相机再次需要电池断电复位。
+
+因此，空枚举检测已被独立验证修正，但相机卡住仍存在，根因及永久热插拔修复均未证实。相机未枚举时，Guardian 无法执行 USB／PTP 恢复。建议拍摄及传输完成 → 结束本次拍摄 → 确认 Tether 已退出 → 再断开 USB；此顺序尚未在本轮实机复测。相机卡住时，先暂停守护，确认无写入后断开 USB、尝试正常 OFF，仍不能关机时再进行必要的电池断电复位。这些观察不能证明睡眠唤醒、长时间或其他机型可靠性。
+
+A later reattachment did enumerate at 5Gbps, but an externally observed Tether appeared before any Guardian preparation/launch request. Start while that process was running correctly observed only; official Tether remained unconnected. Normal quit then allowed guarded service release and strict recovery, followed by a verified Guardian launch and actual official live view. This is a distinct failure mode from an absent USB camera and does not establish who launched the external process.
+
+随后一次重新接入中，S1H 已枚举为 5Gbps，但在守护发出任何准备或启动请求前，已观察到外部来源未知的 Tether 进程。运行中点击开始守护只观察状态，官方程序仍未联机。正常退出后，守护完成有校验的服务释放及严格恢复，新启动的官方 Tether 随后实际显示实时画面。这与 USB 中完全没有相机是两种状态，日志不能确定外部进程由谁打开。
