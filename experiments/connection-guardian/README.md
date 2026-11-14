@@ -14,7 +14,7 @@ Fresh confirmed third-party ownership, including the observed NegPy case, is sho
 
 All launch entries preserve fresh inspection → strict preparation → post-preparation validation → official launch while Tether is absent. Blocked pending work waits without consuming I/O retry counts. When Tether is still running, Guardian remains passive even after a foreign owner releases the camera; request Reconnect if Tether needs a normal restart. Current hardware-free validation totals **347: 16 identity, 51 service guard, 50 event writer and 230 controller/policy checks**. This version has not repeated the failed physical hot-plug test and does not claim to fix that camera lockup.
 
-The current [0.2.4 beta download](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4) is the retained binary release. CI validates only and provides no artifact downloads. Older release/tag and CI downloads are retired; the earlier CLI remains available through its [source build guide](../../docs/CLI.md).
+The current [0.2.4 beta download](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4) is the retained binary release. CI validates only and provides no artifact downloads. Older release/tag and CI downloads are retired; the earlier CLI remains available through its [source build guide](https://github.com/easonzhangbin/lumix-tether-macos-fix/blob/main/docs/CLI.md).
 
 ## Historical 0.2.3 correction
 

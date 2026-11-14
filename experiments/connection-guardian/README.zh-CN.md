@@ -14,7 +14,7 @@
 
 Tether 未运行时，所有启动入口均经过“新鲜检查→严格准备→准备后复核→官方启动”。被拦截的任务保留等待，不消耗 I/O 重试次数。即便第三方已释放相机，只要 Tether 仍运行，Guardian 仍保持被动监测；需要正常重启时使用“重新连接”。当前无硬件验证共 **347 项：身份 16、服务守卫 51、事件日志 50、控制器／策略 230**。本版尚未重做此前失败的物理热拔插，不声称已解决相机卡住。
 
-下载发布仅保留当前 [0.2.4 测试版](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4)；CI 仅验证、不提供产物下载；旧 Release／tag 和 CI 下载退役，早期 CLI 仍可按[源码构建指南](../../docs/CLI.zh-CN.md)使用。
+下载发布仅保留当前 [0.2.4 测试版](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4)；CI 仅验证、不提供产物下载；旧 Release／tag 和 CI 下载退役，早期 CLI 仍可按[源码构建指南](https://github.com/easonzhangbin/lumix-tether-macos-fix/blob/main/docs/CLI.zh-CN.md)使用。
 
 ## 0.2.3 历史修正
 
