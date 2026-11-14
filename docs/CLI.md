@@ -4,9 +4,7 @@
 
 [简体中文](https://github.com/easonzhangbin/lumix-tether-macos-fix/blob/main/docs/CLI.zh-CN.md)
 
-Latest release: [v1.0.1](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/v1.0.1).
-
-Use v1.0.1 in place of the initial v1.0.0 release. The initial release did not include the newer ownership diagnostics and opt-in service restart.
+The CLI is retained as [repository source](https://github.com/easonzhangbin/lumix-tether-macos-fix/tree/main), not an old release download. Build it using [Building from source](#building-from-source) below. Only the current [Guardian 0.2.4 beta](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4) is retained as a binary release; its app bundle is separate from this CLI workflow.
 
 A small Apple Silicon USB recovery helper, started by a `.command` script, that clears pending PTP responses before opening Panasonic LUMIX Tether 2.12. It restored USB tethering and live view on one tested Panasonic DC-S1H setup, over both USB 2 and USB 3.
 
@@ -22,7 +20,7 @@ This is an independent community project. It is not affiliated with Panasonic or
 - A guarded service-ownership helper at `bin/s1h_camera_service`.
 - Automatic selection of Tether's existing interface language, with a command-line override.
 
-The release ZIP extracts to a folder containing the scripts and `bin/`. Keep them together. **It does not contain LUMIX Tether, Panasonic's installer or icons, or Qt libraries.** Install the official application separately.
+The locally built `dist/LUMIX Tether USB Fix/` folder contains the scripts and `bin/`. Keep them together. **It does not contain LUMIX Tether, Panasonic's installer or icons, or Qt libraries.** Install the official application separately.
 
 ## Tested configuration
 
@@ -44,7 +42,7 @@ The helper is built for **arm64 / Apple Silicon**, with a macOS 12 deployment ta
 ## Getting started
 
 1. Download and install **LUMIX Tether 2.12** from [Panasonic's official download page](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html).
-2. Download this project's ZIP from [Releases](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases) and extract the folder.
+2. Obtain the [repository source](https://github.com/easonzhangbin/lumix-tether-macos-fix/tree/main), follow [Building from source](#building-from-source), then use the resulting `dist/LUMIX Tether USB Fix/` folder. Old release and CI downloads are no longer installation sources.
 3. Close Tether and all other camera or photo-import applications. Keep the other applications closed while using Tether. Connect the S1H with a data-capable USB cable and choose **PC(Tether)** on the camera.
 4. Double-click **Restore S1H Connection.command** or **恢复S1H连接.command**. It runs in Terminal and looks for official Tether 2.12 in `/Applications` and `~/Applications`.
 5. After recovery and a successful fresh-session check, the script opens Tether. Select the camera, click **Start**, then **LV** for live view.
@@ -137,6 +135,10 @@ The helper does not take pictures, delete images, update firmware, or log image 
 
 ## Troubleshooting
 
+**A third-party app owns the interface.** If diagnosis identifies an owner such as NegPy, disconnect the camera inside that application or quit it normally. Do not use the camera-service restart to stop a different program. A known camera app merely detected as running is a conservative blocker, not proof of actual ownership.
+
+**Live-view hot-plug freezes the camera.** On the tested setup, five-second USB unplug/reconnect during live view failed under Guardian 0.2.2 and 0.2.3 and needed battery power resets. Neither these CLI scripts nor Guardian can run USB/PTP recovery while the S1H is not enumerated. The cause is unproven; 0.2.4 has not repeated that test. Finish transfer → End This Shoot in Guardian, or quit Tether normally in the CLI workflow → confirm exit → disconnect is a recommendation, not a newly validated hot-plug fix.
+
 **Tether 2.11 opens or an old shortcut crashes.** Confirm the version of the application being opened. An old Dock item or shortcut can still point to 2.11. This script requires official Tether 2.12 and rejects 2.11; a crash from the older app is not evidence that the 2.12 recovery failed.
 
 **The camera or interface is busy.** Close Tether and other camera clients, including Preview or an import window if they are accessing the camera. If the interface remains busy after those apps exit, a stale `ptpcamerad` instance may still own it. An ownership error happens before the helper can drain PTP responses; it is a different failure stage from a command-write timeout. Use `--diagnose`, then the [explicit service-restart mode](#if-the-camera-service-still-owns-the-interface) if appropriate. The default script does not terminate the service automatically.
@@ -151,7 +153,7 @@ For a report, use the [bug template](https://github.com/easonzhangbin/lumix-teth
 
 ## Building from source
 
-The default public build needs Xcode Command Line Tools on an Apple Silicon Mac. It uses system frameworks and does not require Homebrew, Python or third-party libraries.
+The source build needs Xcode Command Line Tools on an Apple Silicon Mac. It uses system frameworks and does not require Homebrew, Python or third-party libraries.
 
 From the repository root:
 
@@ -161,7 +163,7 @@ From the repository root:
 ./scripts/package.sh
 ```
 
-The build creates `dist/LUMIX Tether USB Fix/`, containing the normal and explicit service-restart `.command` entry points, plus the helpers in `bin/`. Packaging creates a public arm64 ZIP and its SHA-256 checksum in `dist/`. The self-check validates the artifact without opening the camera or running Tether. Use each script's `--help` option for its full interface.
+The build creates `dist/LUMIX Tether USB Fix/`, containing the normal and explicit service-restart `.command` entry points, plus the helpers in `bin/`. Packaging creates a local arm64 ZIP and its SHA-256 checksum in `dist/`. The self-check validates the artifact without opening the camera or running Tether. Use each script's `--help` option for its full interface.
 
 ## Contributing
 

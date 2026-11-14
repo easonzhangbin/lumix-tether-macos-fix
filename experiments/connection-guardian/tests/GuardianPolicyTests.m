@@ -62,6 +62,7 @@ static NSDictionary *Changed(NSDictionary *base, NSString *key, id value) {
 @property(nonatomic) NSUInteger launchRequests;
 - (instancetype)initFixture;
 - (void)completeHelper:(int)status result:(NSDictionary *)result;
+- (void)emitProductionSnapshot;
 @end
 @implementation GuardianFixtureController
 - (instancetype)initFixture {
@@ -114,6 +115,7 @@ static NSDictionary *Changed(NSDictionary *base, NSString *key, id value) {
     [self publish:[purpose isEqual:@"end"] ? @"ending_tether" : @"quitting_tether" zh:@"" en:@""];
 }
 - (void)launchTether { ++self.launchRequests; }
+- (void)emitProductionSnapshot { [super publish:@"fixture_snapshot" zh:@"" en:@""]; }
 @end
 
 static void Drain(GuardianFixtureController *fixture) { dispatch_sync(fixture.queue,^{}); }
@@ -379,6 +381,121 @@ static void CheckOpenRecoveryGate(NSDictionary *ready,NSDictionary *identity) {
         "An observed running Tether is never logged as a failed recovery merely because clients are present");
 }
 
+static NSDictionary *OwnerInspection(NSDictionary *ready,NSString *executable,NSString *state) {
+    NSMutableDictionary *inspection=[ready mutableCopy];
+    inspection[@"owner_state"]=state;
+    inspection[@"owner_pid"]=@45678;
+    inspection[@"owner_process"]=@{@"pid":@45678,@"uid":@501,@"real_uid":@501,
+        @"start_seconds":@1234500,@"start_microseconds":@123456,@"executable":executable};
+    inspection[@"restart_guard"]=[executable isEqual:@"/usr/libexec/ptpcamerad"] ? @"opt_in_required" : @"owner_executable_mismatch";
+    return inspection;
+}
+static NSDictionary *ProductionSnapshot(GuardianFixtureController *fixture) {
+    __block NSDictionary *snapshot=nil;
+    fixture.logDirectory=@"/fixture/logs";
+    fixture.onUpdate=^(NSDictionary *value) { snapshot=value; };
+    dispatch_sync(fixture.queue,^{ [fixture emitProductionSnapshot]; });
+    NSDate *deadline=[NSDate dateWithTimeIntervalSinceNow:1.0];
+    while(!snapshot && deadline.timeIntervalSinceNow>0)
+        [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    fixture.onUpdate=nil;
+    return snapshot;
+}
+static void CheckForeignOwnerGate(NSDictionary *ready,NSDictionary *identity) {
+    NSDictionary *foreign=OwnerInspection(ready,@"/Applications/NegPy.app/Contents/MacOS/NegPy",@"confirmed");
+    Check([foreign[@"known_camera_apps"] count]==0 &&
+        [GuardianInspectionReadiness(foreign,NO) isEqual:@"external_interface_owner"],
+        "A confirmed foreign interface owner blocks readiness even when no known camera application is listed");
+    NSDictionary *owner=GuardianForeignInterfaceOwner(foreign);
+    Check([owner[@"name"] isEqual:@"NegPy"] && [owner[@"pid"] isEqual:@45678] && owner[@"executable"]==nil,
+        "Confirmed foreign-owner display exposes the process label and PID without a full executable path");
+    GuardianFixtureController *blocked=Fixture(identity);
+    [blocked openTether]; Drain(blocked);
+    dispatch_sync(blocked.queue,^{ [blocked completeHelper:0 result:foreign]; blocked.retryCount=2; });
+    Check(blocked.desired && blocked.pendingRecovery && blocked.launchRequests==0 && blocked.helperKinds.count==1,
+        "Confirmed NegPy ownership blocks Open without losing the requested handoff");
+    dispatch_sync(blocked.queue,^{
+        for(unsigned i=0;i<100;++i) [blocked receiveInspection:foreign status:0 expired:NO];
+    });
+    Check(blocked.pendingRecovery && blocked.retryCount==2 && blocked.helperKinds.count==1 && blocked.launchRequests==0,
+        "One hundred foreign-owner observations start no USB helper and consume no I/O retry");
+    Check(BlockedFor(blocked,@"external_interface_owner")==1,
+        "Unchanged confirmed foreign ownership records one blocking edge instead of polling spam");
+    dispatch_sync(blocked.queue,^{ blocked.recoverAfter=0; [blocked receiveInspection:ready status:0 expired:NO]; });
+    Check([blocked.helperKinds isEqual:@[@"inspect",@"repair"]] && blocked.launchRequests==0,
+        "Owner release resumes the pending strict preparation without directly launching");
+    dispatch_sync(blocked.queue,^{ [blocked completeHelper:0 result:@{}]; });
+    Check([blocked.helperKinds.lastObject isEqual:@"inspect"] && blocked.launchRequests==0,
+        "Owner release still requires a fresh inspection after the strict USB check");
+    dispatch_sync(blocked.queue,^{ [blocked completeHelper:0 result:ready]; });
+    Check(blocked.launchRequests==1 && !blocked.pendingRecovery && blocked.retryCount==0 &&
+        [blocked.launchSource isEqual:@"afterOpenRecovery"],
+        "Released foreign ownership can complete exactly one prepared Open handoff");
+
+    GuardianFixtureController *arrived=Fixture(identity);
+    [arrived openTether]; Drain(arrived);
+    dispatch_sync(arrived.queue,^{
+        [arrived completeHelper:0 result:ready]; arrived.recoverAfter=0;
+        [arrived receiveInspection:ready status:0 expired:NO]; arrived.retryCount=2;
+        [arrived completeHelper:0 result:@{}]; [arrived completeHelper:0 result:foreign];
+    });
+    Check(arrived.pendingRecovery && arrived.retryCount==2 && arrived.launchRequests==0,
+        "A foreign owner arriving after the USB check keeps pending intent without exhausting retries");
+    NSUInteger helpers=arrived.helperKinds.count;
+    dispatch_sync(arrived.queue,^{
+        for(unsigned i=0;i<100;++i) [arrived receiveInspection:foreign status:0 expired:NO];
+    });
+    Check(arrived.helperKinds.count==helpers && arrived.normalQuitRequests==0,
+        "A post-repair foreign owner is never interrupted and never causes a helper loop");
+    dispatch_sync(arrived.queue,^{
+        arrived.recoverAfter=0; [arrived receiveInspection:ready status:0 expired:NO];
+        [arrived completeHelper:0 result:@{}]; [arrived completeHelper:0 result:ready];
+    });
+    Check(arrived.launchRequests==1 && !arrived.pendingRecovery,
+        "A post-repair foreign owner can release and finish the original handoff once");
+
+    GuardianFixtureController *running=Fixture(identity); running.fakePresent=YES;
+    [running openTether]; Drain(running);
+    dispatch_sync(running.queue,^{ [running receiveInspection:foreign status:0 expired:NO]; });
+    Check(running.helperKinds.count==0 && running.normalQuitRequests==0 && running.launchRequests==0,
+        "Foreign ownership observation never interrupts an already-running Tether process");
+    NSDictionary *service=OwnerInspection(ready,@"/usr/libexec/ptpcamerad",@"confirmed");
+    Check(GuardianInspectionReadiness(service,NO)==nil && GuardianForeignInterfaceOwner(service)==nil,
+        "The verified system camera service is not mistaken for a foreign application owner");
+    NSDictionary *official=OwnerInspection(ready,@"/Applications/LUMIX Tether.app/Contents/MacOS/LUMIX Tether",@"confirmed");
+    Check(GuardianForeignInterfaceOwner(official)==nil,
+        "The exact supported official Tether executable is not marked as a foreign application");
+    Check(GuardianForeignInterfaceOwner(OwnerInspection(ready,@"/Applications/Other.app/Contents/MacOS/ptpcamerad",@"confirmed"))!=nil,
+        "A lookalike basename cannot inherit the system camera-service exemption");
+    NSDictionary *unconfirmed=Changed(foreign,@"owner_state",@"unknown");
+    Check(GuardianForeignInterfaceOwner(unconfirmed)==nil && ![GuardianInspectionReadiness(unconfirmed,NO) isEqual:@"external_interface_owner"],
+        "Unconfirmed old owner metadata cannot assert current foreign ownership");
+    Check(GuardianForeignInterfaceOwner(Changed(foreign,@"owner_pid",@45679))==nil &&
+        GuardianForeignInterfaceOwner(Changed(foreign,@"owner_process",NSNull.null))==nil,
+        "Mismatched or malformed process identity cannot produce a confirmed foreign-owner display");
+    Check(![GuardianPublishedGate(foreign,YES,NO,NO) isEqual:@"external_interface_owner"] &&
+        ![GuardianPublishedGate(Changed(foreign,@"inspection_error",@"stale_observation"),YES,YES,NO) isEqual:@"external_interface_owner"],
+        "Expired or failed inspection evidence cannot publish a fresh foreign-owner gate");
+    GuardianFixtureController *status=Fixture(identity); status.inspection=foreign;
+    status.inspectionObservationValid=YES; status.inspectionObservedAt=GuardianNow();
+    status.tetherObservationValid=YES; status.tetherObservedAt=GuardianNow();
+    NSDictionary *fresh=ProductionSnapshot(status);
+    Check(fresh && [fresh[@"external_interface_owner"] boolValue] &&
+        [fresh[@"external_interface_owner_info"][@"name"] isEqual:@"NegPy"] &&
+        [fresh[@"inspection_gate"] isEqual:@"external_interface_owner"],
+        "The production snapshot publishes a fresh confirmed foreign owner and display information");
+    status.inspectionObservedAt=GuardianNow()-10;
+    NSDictionary *stale=ProductionSnapshot(status);
+    Check(stale && ![stale[@"external_interface_owner"] boolValue] &&
+        [stale[@"external_interface_owner_info"] count]==0 &&
+        ![stale[@"inspection_gate"] isEqual:@"external_interface_owner"],
+        "Expired production snapshot evidence clears the red-owner flag and owner display together");
+    status.inspection=unconfirmed; status.inspectionObservedAt=GuardianNow();
+    NSDictionary *unknown=ProductionSnapshot(status);
+    Check(unknown && ![unknown[@"external_interface_owner"] boolValue] && [unknown[@"external_interface_owner_info"] count]==0,
+        "Unknown owner metadata cannot retain the last confirmed process in the production display");
+}
+
 static void CheckEndTransitions(NSDictionary *ready, NSDictionary *identity) {
     GuardianFixtureController *direct=Fixture(identity); direct.fakePresent=YES; direct.desired=YES;
     [direct endSession]; Drain(direct);
@@ -539,6 +656,7 @@ int main(void) {
         CheckObservationEvents(identity);
         CheckActionAndLaunchEvents(ready,identity);
         CheckOpenRecoveryGate(ready,identity);
+        CheckForeignOwnerGate(ready,identity);
         Check(ForbiddenProcessCalls==0,"All exercised asynchronous paths remain inside fake process boundaries");
         printf("Guardian policy: %u checks, %u failures; production pure functions and fake asynchronous End paths; no hardware, app launch, real process enumeration or signals.\n", Checks, Failures);
         return Failures ? 1 : 0;

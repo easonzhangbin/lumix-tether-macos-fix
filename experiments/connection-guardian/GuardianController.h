@@ -9,6 +9,8 @@ NS_ASSUME_NONNULL_BEGIN
  * inspection_observation_valid, capture_state, shooting_verified, busy, retry_count,
  * inspection_gate (fixed reason or ready), blocking_camera_apps (safe name,
  * identifier and optional PID; presence does not prove USB ownership),
+ * external_interface_owner and external_interface_owner_info {name,pid}
+ * (fresh, confirmed third-party interface ownership only; otherwise false/{}),
  * log_directory; inspection contains the last read-only service snapshot.
  * start is explicit opt-in to bounded service recovery while Tether is absent.
  * pause/stopTool leave Tether alone. Reconnect first requests normal quit.

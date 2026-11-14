@@ -8,7 +8,7 @@ PROJECT_ROOT="${TASK_DIR:h:h}"
 APP_PATH="${GUARDIAN_OUTPUT_DIR:-$TASK_DIR/build}/LUMIX Connection Guardian.app"
 [[ -d "$APP_PATH" ]] || { print -u2 -- 'Build Guardian first.'; exit 1; }
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
-[[ "$VERSION" == '0.2.3' ]] || { print -u2 -- 'Unexpected app version.'; exit 1; }
+[[ "$VERSION" == '0.2.4' ]] || { print -u2 -- 'Unexpected app version.'; exit 1; }
 ARCHIVE_NAME="LUMIX-Connection-Guardian-${VERSION}-arm64.zip"
 TASK_PACKAGE_DIR="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/lumix-guardian-package.XXXXXXXX")"
 trap '/bin/rm -rf -- "$TASK_PACKAGE_DIR"' EXIT

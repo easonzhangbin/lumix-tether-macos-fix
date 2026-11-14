@@ -4,13 +4,21 @@
 
 A menu-bar connection supervisor for DC-S1H. Separately installed official LUMIX Tether 2.12 retains shooting, exposure controls, white balance and original-file saving. This utility prepares the connection, monitors USB changes and coordinates application restarts.
 
-This is **Guardian 0.2.3 community beta**, published as [guardian-v0.2.3](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.3). A previous single Guardian recovery handoff was followed by official Tether preview and a saved 6000×4000 RAW (36,048,384 bytes). Aperture, shutter, ISO and color-temperature controls were verified separately in the official UI. These short checks do not establish repeated hot-plug, sleep/wake or long-duration reliability.
+This is **Guardian 0.2.4 community beta**, published as [guardian-v0.2.4](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4). A previous single Guardian recovery handoff was followed by official Tether preview and a saved 6000×4000 RAW (36,048,384 bytes). Aperture, shutter, ISO and color-temperature controls were verified separately in the official UI. These short checks do not establish repeated hot-plug, sleep/wake or long-duration reliability.
 
 The app provides End This Shoot and separates USB detection, the Tether process and the shooting-connection state. Local rotating event logs support troubleshooting. Confirm shooting inside Tether: a present USB device, recorded interface owner or running process never establishes that capture is working.
 
-## 0.2.3 correction
+## 0.2.4 external-owner check
 
-The service helper now accepts a successful `IOServiceGetMatchingServices` result with a NULL iterator as no matching services. Only its two matching-service enumeration checks changed: actual API failures and invalid non-NULL iterators still fail closed, and recursive registry validation is unchanged. The service self-tests increased from 43 to 51; the complete hardware-free build passed **310 checks: 16 identity, 51 service guard, 50 event writer and 193 controller/policy**.
+Fresh confirmed third-party ownership, including the observed NegPy case, is shown in red in the interface-owner and recovery rows. Disconnect the camera in that app or quit it normally; Guardian does not terminate it or discard its work. Unknown or stale inspection clears the warning and old owner name. Detection of Preview or another known running client is a separate conservative blocker, not proof that the client owns USB. Normal system `ptpcamerad` ownership is eligible only for the existing guarded current-user service procedure, not third-party-app termination.
+
+All launch entries preserve fresh inspection → strict preparation → post-preparation validation → official launch while Tether is absent. Blocked pending work waits without consuming I/O retry counts. When Tether is still running, Guardian remains passive even after a foreign owner releases the camera; request Reconnect if Tether needs a normal restart. Current hardware-free validation totals **347: 16 identity, 51 service guard, 50 event writer and 230 controller/policy checks**. This version has not repeated the failed physical hot-plug test and does not claim to fix that camera lockup.
+
+The current [0.2.4 beta download](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4) is the retained binary release. CI validates only and provides no artifact downloads. Older release/tag and CI downloads are retired; the earlier CLI remains available through its [source build guide](../../docs/CLI.md).
+
+## Historical 0.2.3 correction
+
+The service helper now accepts a successful `IOServiceGetMatchingServices` result with a NULL iterator as no matching services. Only its two matching-service enumeration checks changed: actual API failures and invalid non-NULL iterators still fail closed, and recursive registry validation is unchanged. The service self-tests increased from 43 to 51; the 0.2.3 hardware-free build passed **310 checks: 16 identity, 51 service guard, 50 event writer and 193 controller/policy**.
 
 From the observed exit of the old Tether process to the verified new launch, the measured interval was 3.852 seconds on 0.2.2 and 3.877 seconds on the installed 0.2.3 build. Official live view was confirmed afterward; these intervals do not measure time to live view. **On the tested setup, the physical USB test—unplug, wait five seconds, reconnect—failed on both versions.** The camera remained on “Please wait”, could not switch off normally and needed a battery power reset each time. On 0.2.3, Tether exited normally 0.968 seconds after detected detach, but the camera did not re-enumerate; no subsequent repair or launch ran. The corrected read-only inspection returned exit zero, zero devices and no error. That confirms the empty-enumeration correction, not a cure for the camera lockup. Its cause remains unproven, and Guardian cannot run its USB/PTP recovery while the camera is not enumerated.
 
@@ -43,6 +51,8 @@ The app does not install a login item, system service or LaunchAgent. Its Chines
 Recommended shutdown order: **finish transfer → End This Shoot → confirm Tether exited → disconnect USB.** This order has not been hardware-retested in this round. The five-second unplug/reconnect during live view failed on the tested setup; automatic recovery is not guaranteed.
 
 ## Scope
+
+**DC-S1H and arm64 / Apple Silicon only.** Install official Tether 2.12 separately. The tested setup is M1 Max/macOS 27.0.1; the macOS 12 deployment target does not establish support for every OS, Mac or camera.
 
 Monitoring reads USB registry information, ownership and application processes. A new USB recovery may start only while Tether is absent. A camera-service restart requires the existing guard to confirm this user's specific service and permit the action. The tool does not seize drivers, terminate other camera applications, capture images, or read/delete photographs.
 

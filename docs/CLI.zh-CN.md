@@ -4,9 +4,7 @@
 
 [English](https://github.com/easonzhangbin/lumix-tether-macos-fix/blob/main/docs/CLI.md)
 
-最新版本：[v1.0.1](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/v1.0.1)。
-
-请使用 v1.0.1 替代最初的 v1.0.0。最初版本不包含新版的占用诊断和明确选择的服务重启流程。
+CLI 以[仓库源码](https://github.com/easonzhangbin/lumix-tether-macos-fix/tree/main)保留，不再提供旧版下载；请按下方[从源码构建](#从源码构建)使用。二进制发布仅保留当前 [Guardian 0.2.4 测试版](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4)，其应用包与本页 CLI 流程分开。
 
 通过 `.command` 脚本运行的小型 Apple Silicon USB 恢复工具：先清理未读完的 PTP 响应，再打开松下 LUMIX Tether 2.12。已在一套 Panasonic DC-S1H 环境上恢复 USB2、USB3 联机连接，并验证 Tether 实时预览正常。
 
@@ -22,7 +20,7 @@
 - 带占用核对守卫的服务检查程序，位于 `bin/s1h_camera_service`。
 - 自动选择 Tether 原有界面语言，也可通过命令行指定语言。
 
-Release ZIP 解压后得到包含脚本与 `bin/` 的目录，请保持它们在一起。公开包**不包含 Tether、松下安装包或图标，也不包含 Qt 库**。请自行安装官方 Tether。
+本地构建的 `dist/LUMIX Tether USB Fix/` 目录包含脚本与 `bin/`，请保持它们在一起。构建产物**不包含 Tether、松下安装包或图标，也不包含 Qt 库**。请自行安装官方 Tether。
 
 ## 已验证环境
 
@@ -44,7 +42,7 @@ Release ZIP 解压后得到包含脚本与 `bin/` 的目录，请保持它们在
 ## 使用方法
 
 1. 从[松下官方下载页](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)下载并安装 **LUMIX Tether 2.12**。
-2. 从本项目的 [Releases](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases) 下载 ZIP，解压得到工具目录。
+2. 获取[仓库源码](https://github.com/easonzhangbin/lumix-tether-macos-fix/tree/main)，按[从源码构建](#从源码构建)操作，再使用生成的 `dist/LUMIX Tether USB Fix/` 目录；旧 Release 和 CI 下载不再作为安装来源。
 3. 退出 Tether 和所有其他相机、照片导入软件，并在使用 Tether 期间保持其他软件关闭。使用支持数据传输的 USB 线连接 S1H，在相机上选择 **PC(Tether)／PC（联机拍摄）**。
 4. 双击 **恢复S1H连接.command** 或 **Restore S1H Connection.command**。脚本会在终端中运行，并在 `/Applications` 和 `~/Applications` 查找官方 Tether 2.12。
 5. 清理和新会话验证成功后，脚本会打开 Tether。选择相机，点击 **Start／开始**，再点击 **LV** 打开实时预览。
@@ -137,6 +135,10 @@ v1.0.1 增加了只读占用诊断，以及独立、需明确选择的服务重�
 
 ## 常见问题
 
+**第三方软件持有接口。** 若诊断确认 NegPy 等软件持有接口，请在该软件中断开相机或正常退出。不要用相机服务重启去结束别的程序。仅检测到已知相机软件正在运行，是保守拦截，不代表已证明实际占用。
+
+**实时预览时拔插导致相机卡住。** 本机 Guardian 0.2.2／0.2.3 的五秒 USB 拔插均失败，并需电池断电复位。S1H 未枚举时，CLI 和 Guardian 均无法执行 USB／PTP 恢复。根因未证，0.2.4 尚未重做该测试。建议“传输完成→Guardian 结束本次拍摄，或 CLI 流程中正常退出 Tether→确认退出→再断 USB”，并非新近验证的热插拔修复。
+
 **打开的是 Tether 2.11，或旧快捷方式启动后崩溃。** 请核对实际运行应用的版本。旧 Dock 图标或快捷方式可能仍指向 2.11。此脚本要求官方 Tether 2.12，并拒绝 2.11；旧版应用的崩溃不能用来判断 2.12 的恢复是否失败。
 
 **提示相机或接口被占用。** 退出 Tether 和其他相机客户端，包括正在访问相机的“预览”或导入窗口。若应用退出后仍被占用，可能是旧 `ptpcamerad` 实例继续持有接口。接口占用发生在排空 PTP 响应之前，与发送命令超时属于不同阶段。可先运行 `--diagnose`，再按[明确的服务重启流程](#相机服务仍占用接口时)处理；默认脚本不会自动结束该服务。
@@ -151,7 +153,7 @@ v1.0.1 增加了只读占用诊断，以及独立、需明确选择的服务重�
 
 ## 从源码构建
 
-默认公开版本在 Apple Silicon Mac 上使用 Xcode Command Line Tools 构建，只依赖系统框架，无需 Homebrew、Python 或第三方库。
+源码在 Apple Silicon Mac 上使用 Xcode Command Line Tools 构建，只依赖系统框架，无需 Homebrew、Python 或第三方库。
 
 在仓库根目录执行：
 
@@ -161,7 +163,7 @@ v1.0.1 增加了只读占用诊断，以及独立、需明确选择的服务重�
 ./scripts/package.sh
 ```
 
-构建会生成 `dist/LUMIX Tether USB Fix/`，其中包含普通恢复、明确选择的服务重启 `.command` 入口，以及 `bin/` 中的辅助程序。打包脚本在 `dist/` 生成公开 arm64 ZIP 及 SHA-256 校验文件。自检只验证产物，不访问相机或运行 Tether。各脚本的完整参数可通过 `--help` 查看。
+构建会生成 `dist/LUMIX Tether USB Fix/`，其中包含普通恢复、明确选择的服务重启 `.command` 入口，以及 `bin/` 中的辅助程序。打包脚本在 `dist/` 生成本地 arm64 ZIP 及 SHA-256 校验文件。自检只验证产物，不访问相机或运行 Tether。各脚本的完整参数可通过 `--help` 查看。
 
 ## 参与贡献
 

@@ -3,6 +3,14 @@
 #import <AppKit/AppKit.h>
 #import "GuardianController.h"
 
+// Presentation only: stale registry evidence must never retain an app-specific
+// ownership warning. Classification and all recovery policy remain controller-owned.
+static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *inspection, BOOL fresh) {
+    id external = snapshot[@"external_interface_owner"];
+    return fresh && [inspection[@"owner_state"] isEqual:@"confirmed"] &&
+        [external isKindOfClass:NSNumber.class] && [external boolValue];
+}
+
 @interface GuardianApp : NSObject <NSApplicationDelegate>
 @property(nonatomic, strong) GuardianController *controller;
 @property(nonatomic, strong) NSStatusItem *statusItem;
@@ -60,6 +68,16 @@
 - (void)setInfo:(NSMenuItem *)item text:(NSString *)text {
     item.title = [self menuText:text];
     item.toolTip = text;
+}
+- (void)setInformationAlert:(BOOL)alert item:(NSMenuItem *)item {
+    NSDictionary *attributes = alert ? @{
+        NSForegroundColorAttributeName: NSColor.systemRedColor,
+        NSFontAttributeName: [NSFont boldSystemFontOfSize:NSFont.systemFontSize]
+    } : @{};
+    item.attributedTitle = [[NSAttributedString alloc] initWithString:item.title attributes:attributes];
+    // Info rows have no action. Keeping an alert enabled preserves its explicit
+    // foreground color rather than applying the menu's disabled gray treatment.
+    item.enabled = alert;
 }
 - (NSMenuItem *)informationItem:(NSString *)title {
     NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:NULL keyEquivalent:@""];
@@ -345,11 +363,18 @@
     self.shootingItem.toolTip = [self text:@"守护工具不会通过进程或 USB 占用推断已联机。请在官方 Tether 中确认相机、实时预览和拍摄状态。"
         english:@"Guardian does not infer a shooting connection from a process or USB ownership. Confirm the camera, live view and shooting status in official Tether."];
     NSString *ownerState = [self string:inspection[@"owner_state"]];
+    BOOL externalOwner = GuardianUIHasExternalOwner(self.snapshot, inspection, inspectionValid);
+    id externalInfo = self.snapshot[@"external_interface_owner_info"];
+    NSString *externalName = [externalInfo isKindOfClass:NSDictionary.class]
+        ? [self string:externalInfo[@"name"]] : @"";
+    if (externalOwner && !externalName.length) externalName = [self text:@"其他软件" english:@"Another Application"];
     NSString *owner = @"";
     id ownerProcess = inspection[@"owner_process"];
-    if ([ownerProcess isKindOfClass:NSDictionary.class]) owner = [[self string:ownerProcess[@"executable"]] lastPathComponent];
-    if ([owner isEqualToString:@"ptpcamerad"]) owner = [self text:@"系统相机服务" english:@"System Camera Service"];
+    NSString *ownerPath = [ownerProcess isKindOfClass:NSDictionary.class] ? [self string:ownerProcess[@"executable"]] : @"";
+    owner = ownerPath.lastPathComponent;
+    if ([ownerPath isEqualToString:@"/usr/libexec/ptpcamerad"]) owner = [self text:@"系统相机服务" english:@"System Camera Service"];
     if (!inspectionValid) owner = [self text:@"暂时无法确认" english:@"State Is Unknown"];
+    else if (externalOwner) owner = [NSString stringWithFormat:[self text:@"%@（已确认）" english:@"%@ (Confirmed)"], externalName];
     else if ([ownerState isEqualToString:@"none"]) owner = [self text:@"无占用记录" english:@"No Owner Recorded"];
     else if (![ownerState isEqualToString:@"confirmed"]) owner = [self text:@"暂时无法确认" english:@"State Is Unknown"];
     else if (!owner.length) owner = [self text:@"尚未确认" english:@"Not Yet Confirmed"];
@@ -364,6 +389,12 @@
     if (!inspectionValid) {
         recoveryHelp = [self text:@"等待新的只读检查；过期或失败的检查不能证明没有其他相机软件运行。"
             english:@"Waiting for a fresh read-only check. An expired or failed check cannot establish that other camera apps are closed."];
+    } else if (externalOwner) {
+        recovery = [NSString stringWithFormat:[self text:@"接口被 %@ 占用，请先在该软件断开相机或正常退出"
+            english:@"Interface Owned by %@; Disconnect There or Quit Normally"], externalName];
+        recoveryHelp = [NSString stringWithFormat:[self text:@"请在 %@ 中断开相机或正常退出该软件后再准备连接；守护工具不会自动结束它或丢弃未保存内容。"
+            english:@"Disconnect the camera in %@ or quit that app normally before preparing the connection. Guardian will not force-quit it or discard unsaved work."], externalName];
+        self.ownerItem.toolTip = recoveryHelp;
     } else if (blockers.count) {
         NSString *allNames = [blockers componentsJoinedByString:[self text:@"、" english:@", "]];
         NSArray<NSString *> *shortNames = blockers.count > 2 ? [blockers subarrayWithRange:NSMakeRange(0, 2)] : blockers;
@@ -371,8 +402,10 @@
         if (blockers.count > 2) summary = [summary stringByAppendingFormat:[self text:@"等 %lu 个应用" english:@" + %lu More"],
             (unsigned long)(self.chinese ? blockers.count : blockers.count - 2)];
         recovery = [NSString stringWithFormat:[self text:@"请先退出 %@" english:@"Quit %@ First"], summary];
-        recoveryHelp = [NSString stringWithFormat:[self text:@"请正常退出 %@；已请求的连接准备会在检查通过后继续，不会自动强退或丢弃未保存内容。"
-            english:@"Quit %@ normally. Pending preparation continues after checks pass; Guardian will not force-quit apps or discard unsaved work."], allNames];
+        recoveryHelp = [NSString stringWithFormat:[self text:@"检测到 %@ 正在运行，不代表已占用接口。请正常退出后等待继续；不会自动强退或丢弃未保存内容。"
+            english:@"%@ is running; this does not prove USB ownership. Quit normally to continue. Guardian will not force-quit apps or discard unsaved work."], allNames];
+    } else if ([gate isEqualToString:@"external_interface_owner"]) {
+        recovery = [self text:@"接口占用状态待重新确认" english:@"Interface Ownership Needs a Fresh Check"];
     } else if ([gate isEqualToString:@"tether_running"] || (tetherValid && tetherRunning)) {
         recovery = [self text:@"Tether 运行中，仅观察状态" english:@"Tether Running; Observing Only"];
     } else if ([gate isEqualToString:@"ready"]) {
@@ -390,6 +423,9 @@
     }
     [self setInfo:self.recoveryItem text:[NSString stringWithFormat:[self text:@"恢复前检查：%@" english:@"Recovery Check: %@"], recovery]];
     self.recoveryItem.toolTip = recoveryHelp;
+    BOOL recoveryAlert = externalOwner || (inspectionValid && (blockers.count || [gate isEqualToString:@"camera_apps_running"]));
+    [self setInformationAlert:externalOwner item:self.ownerItem];
+    [self setInformationAlert:recoveryAlert item:self.recoveryItem];
     self.startItem.title = desired ? [self text:@"保持 Tether 运行" english:@"Keep Tether Running"]
         : (ended ? [self text:@"开始新一次拍摄并守护" english:@"Start a New Session and Guardian"]
             : [self text:@"开始守护并打开 Tether" english:@"Start Guardian and Open Tether"]);
@@ -441,10 +477,14 @@
     self.windowShooting.toolTip = self.shootingItem.toolTip;
     self.windowOwner.stringValue = self.ownerItem.title;
     self.windowOwner.toolTip = self.ownerItem.toolTip;
+    self.windowOwner.textColor = externalOwner ? NSColor.systemRedColor : NSColor.labelColor;
+    self.windowOwner.font = externalOwner ? [NSFont boldSystemFontOfSize:14] : [NSFont systemFontOfSize:14];
     self.windowRecovery.stringValue = self.recoveryItem.title;
     self.windowRecovery.toolTip = recoveryHelp;
+    self.windowRecovery.textColor = recoveryAlert ? NSColor.systemRedColor : NSColor.labelColor;
     self.windowRecoveryHelp.stringValue = recoveryHelp;
     self.windowRecoveryHelp.toolTip = recoveryHelp;
+    self.windowRecoveryHelp.textColor = recoveryAlert ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
     self.windowGuardian.stringValue = [NSString stringWithFormat:[self text:@"守护状态：%@\n%@" english:@"Guardian: %@\n%@"], phase, message];
     self.windowGuardian.toolTip = self.windowGuardian.stringValue;
     self.windowStart.enabled = self.startItem.enabled;

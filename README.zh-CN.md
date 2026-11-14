@@ -6,15 +6,21 @@
 
 **让 S1H 重新连上 Mac，继续使用原厂 Tether 拍摄。**
 
-**本机环境的五秒 USB 热拔插测试在 0.2.2 和 0.2.3 均失败，并需取电池断电复位。此测试版尚未解决该相机卡住问题。**
+**本机环境的五秒 USB 热拔插测试在 0.2.2 和 0.2.3 均失败，并需取电池断电复位。0.2.4 测试版尚未复测热拔插，不声称解决该卡住问题。**
 
 面向 Apple Silicon Mac 的独立菜单栏工具：准备 S1H 的 USB 连接，交给官方 Tether 2.12，再监测连接和应用状态。实时预览、拍摄、光圈、快门、ISO、白平衡及原片保存继续由松下程序提供；Guardian 负责连接恢复，以及清楚地结束本次拍摄。
 
-[下载 Guardian 0.2.3 测试版](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.3) · [源码与详细说明](experiments/connection-guardian/README.zh-CN.md) · [早期恢复脚本](docs/CLI.zh-CN.md)
+[下载 Guardian 0.2.4 测试版](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4) · [源码与详细说明](experiments/connection-guardian/README.zh-CN.md) · [早期恢复脚本](docs/CLI.zh-CN.md)
 
 当前为在一套 S1H 环境验证的社区测试版，与松下或 Apple 无隶属关系。用户需另行安装官方 Tether；下载包只包含本项目应用及辅助程序。
 
-## 0.2.3 修正
+## 0.2.4：明确提示外部接口占用
+
+新鲜检查确认第三方软件持有接口时，会显示红字，例如 **“接口被 NegPy 占用，请先在该软件断开相机或正常退出”**。信息未知或过期后清除旧名称及红色警告。检测到某相机软件正在运行，是另一项保守恢复拦截，不等于证明它持有接口。正常 macOS `ptpcamerad` 服务与第三方软件分开处理，只有守卫核对通过才可恢复该服务；Guardian 不会自动关闭其他相机软件。
+
+等待占用释放不会消耗 I/O 重试次数。若 Tether 仍运行，其他软件释放相机后也不会开始 USB 操作；需要正常重启 Tether 时，请使用**重新连接**。
+
+### 此前 0.2.3 修正
 
 修正 macOS 成功返回 NULL 空迭代器、表示没有匹配 USB 服务时被误判为检查错误的问题。真实 API 错误或非 NULL 迭代器失效时仍停止恢复，递归注册表检查未放宽。此改动修复空设备检测，不代表已解释下述相机卡住的原因。
 
@@ -37,10 +43,19 @@ S1H 未在 USB 中重新枚举时，此测试版无法开始连接恢复。
 
 物理断开 USB 后，可以请求由 Guardian 启动且身份仍一致的 Tether 正常退出。恢复有重试上限；占用未知或其他相机软件运行时，守卫可拒绝服务恢复。它无法提供跨应用 USB 禁入锁，也不能修复所有 Tether 内部挂起。
 
+## 工作原理
+
+1. 只读检查 USB、接口登记占用者及运行中的相机软件，使用新鲜观察结果。
+2. 外部软件被确认持有接口，或检测到其他相机客户端时，等待准备条件满足。红字是请你在对应软件断开相机或正常退出的提示。
+3. Tether 已运行时只监测。**开始守护**及**检查连接并打开 Tether**不会修复正在运行的会话；需要重启时用**重新连接**，先请求正常退出。
+4. Tether 未运行且检查通过后，原生辅助程序排空完整的残留 PTP 响应并验证新会话。若已核实的本用户相机服务阻止访问，明确点击开始时的授权允许有上限、受守卫保护的服务恢复；它可能结束该特定服务实例，不会结束任意相机软件。
+5. 启动前再次核对相机身份、进程及占用。期间出现新的拦截条件会保留准备任务，不绕过检查。
+6. 打开另行安装、未经修改的官方 Tether，在其中选择相机、开始及 LV；实际预览、拍摄、参数控制及原片保存由松下应用完成。
+
 ## 安装与使用
 
 1. 从[松下官方下载页](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)安装 **LUMIX Tether 2.12**，放在 `/Applications` 或 `~/Applications`。
-2. 下载并解压 [Guardian 测试版 ZIP](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.3)，将 **LUMIX Connection Guardian.app** 放进应用程序文件夹。
+2. 下载并解压 [Guardian 测试版 ZIP](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4)，将 **LUMIX Connection Guardian.app** 放进应用程序文件夹。
 3. 退出其他相机／照片导入软件，用数据线连接 S1H，相机选择 **PC(Tether)**。
 4. 打开 Guardian，点击**开始守护**。在官方 Tether 中选择相机、点击**开始**及 **LV**，确认预览后，向自己指定的保存目录试拍。
 5. 拍摄及文件传输完成后，点击**结束本次拍摄**。关闭状态窗口仍会保留菜单栏图标。
@@ -71,7 +86,8 @@ S1H 未在 USB 中重新枚举时，此测试版无法开始连接恢复。
 | 相机控制 | 光圈、快门、ISO、白平衡色温在原厂界面单独完成修改及恢复验证 |
 | 会话操作 | 仅暂停会保留 Tether；结束拍摄能正常退出，短时间观察未自动重开 |
 | 正常退出后恢复 | 0.2.3 从观察到旧进程退出至核实新 Tether 启动耗时 3.877 秒；之后另行确认实际官方实时预览通过 |
-| 自动检查 | 310 项通过：设备身份 16、服务守卫 51、事件日志 50、控制器／策略 193；均采用纯检查或模拟环境 |
+| 占用提示 | 已安装的 0.2.4 在真实 NegPy 连接时，接口占用、恢复前检查和处理提示均显示红字；守护保持暂停 |
+| 自动检查 | 347 项通过：设备身份 16、服务守卫 51、事件日志 50、控制器／策略 230；均采用纯检查或模拟环境 |
 
 0.2.2 从观察到旧进程退出至核实新 Tether 启动耗时 3.852 秒，之后另行确认实时预览通过。但随后拔下 USB、等待五秒再接回的测试失败：相机停在“Please wait”，无法正常关机，需取出并重新装入电池断电复位。**0.2.3 相同五秒重连测试也失败。** 检测到断开后 0.968 秒，Tether 已正常退出，但相机未重新枚举，因此没有继续运行恢复或启动程序。修正后的只读检查成功报告零设备且无错误；相机仍需再次取电池复位，卡住的根因未证。
 
@@ -100,7 +116,7 @@ Apple Silicon Mac 安装 Xcode Command Line Tools 后执行：
 
 构建和自测不会连接相机或打开 Tether。工程位于 iCloud 同步目录时，请使用[详细说明](experiments/connection-guardian/README.zh-CN.md)中的独立输出目录，避免文件提供程序元数据影响严格签名验证。
 
-早期 `.command` 工具仍保留在 [v1.0.1](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/v1.0.1)，用法见[脚本指南](docs/CLI.zh-CN.md)。主分支还包含尚未单独发布的 CLI 1.0.2 守卫修正。[技术记录与边界](docs/TECHNICAL.md)、[参与贡献](CONTRIBUTING.md)、[问题反馈](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues/new?template=bug_report.yml)。
+早期 `.command` 工具保留为源码，构建及用法见[脚本指南](docs/CLI.zh-CN.md)。下载仅保留当前 Guardian Release 的 ZIP 及 SHA-256 文件。CI 只做验证，不再提供额外产物下载；旧 Release／tag 和 CI 下载退役。[技术记录与边界](docs/TECHNICAL.md)、[参与贡献](CONTRIBUTING.md)、[问题反馈](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues/new?template=bug_report.yml)。
 
 ## 支持开发
 

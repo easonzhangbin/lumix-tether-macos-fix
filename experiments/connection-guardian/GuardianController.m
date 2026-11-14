@@ -70,6 +70,31 @@ static NSDictionary *GuardianSafeIdentityFields(NSDictionary *identity) {
     if(!GuardianIdentityShape(identity)) return @{};
     return @{@"pid":identity[@"pid"],@"start_seconds":identity[@"start_seconds"],@"start_microseconds":identity[@"start_microseconds"]};
 }
+static NSDictionary *GuardianForeignInterfaceOwner(NSDictionary *inspection) {
+    if(![inspection isKindOfClass:NSDictionary.class] ||
+        (inspection[@"inspection_error"] && inspection[@"inspection_error"]!=NSNull.null) ||
+        ![inspection[@"device_model_state"] isEqual:@"confirmed"] || ![inspection[@"owner_state"] isEqual:@"confirmed"]) return nil;
+    for(NSString *key in @[@"matching_usb_id_device_count",@"s1h_device_count",@"s1h_interface_count"])
+        if(![inspection[key] isKindOfClass:NSNumber.class] || [inspection[key] unsignedIntegerValue]!=1) return nil;
+    if(![inspection[@"interface_registry_id"] isKindOfClass:NSNumber.class] || [inspection[@"interface_registry_id"] unsignedLongLongValue]==0) return nil;
+    NSDictionary *owner=inspection[@"owner_process"];
+    if(![owner isKindOfClass:NSDictionary.class] || ![owner[@"executable"] isKindOfClass:NSString.class]) return nil;
+    NSMutableDictionary *identity=[owner mutableCopy]; identity[@"path"]=owner[@"executable"];
+    if(!GuardianIdentityShape(identity) || ![inspection[@"owner_pid"] isKindOfClass:NSNumber.class] ||
+        ![inspection[@"owner_pid"] isEqual:owner[@"pid"]]) return nil;
+    NSString *path=owner[@"executable"];
+    if([path isEqual:@"/usr/libexec/ptpcamerad"]) return nil;
+    /* Exact supported installation paths classify the official client;
+     * basename alone is never an exemption. This classification grants no
+     * quit/signal authority: those paths still require dynamic signature and
+     * PID/start-time validation in the existing application lifecycle code. */
+    NSString *userTether=[NSHomeDirectory() stringByAppendingPathComponent:@"Applications/LUMIX Tether.app/Contents/MacOS/LUMIX Tether"];
+    if([path isEqual:@"/Applications/LUMIX Tether.app/Contents/MacOS/LUMIX Tether"] || [path isEqual:userTether]) return nil;
+    NSString *name=path.lastPathComponent;
+    if(!name.length || name.length>80 || [name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location!=NSNotFound)
+        name=@"External USB application";
+    return @{@"name":name,@"pid":owner[@"pid"]};
+}
 static NSString *GuardianInspectionReadiness(NSDictionary *inspection, BOOL tetherRunning) {
     if (tetherRunning) return @"tether_running";
     if (![inspection isKindOfClass:NSDictionary.class] ||
@@ -79,6 +104,7 @@ static NSString *GuardianInspectionReadiness(NSDictionary *inspection, BOOL teth
     if(![inspection[@"device_model_state"] isKindOfClass:NSString.class]) return @"inspection_error";
     if (![inspection[@"known_camera_apps"] isKindOfClass:NSArray.class] ||
         ![inspection[@"other_usb_ptp_interfaces"] isKindOfClass:NSArray.class]) return @"inspection_error";
+    if(GuardianForeignInterfaceOwner(inspection)) return @"external_interface_owner";
     if ([inspection[@"known_camera_apps"] count]) return @"camera_apps_running";
     if ([inspection[@"matching_usb_id_device_count"] unsignedIntegerValue] == 0) return @"no_device";
     if (![inspection[@"device_model_state"] isEqual:@"confirmed"] ||
@@ -123,6 +149,10 @@ static NSArray<NSDictionary *> *GuardianBlockingCameraApps(NSDictionary *inspect
     return result;
 }
 static NSString *GuardianPublishedGate(NSDictionary *inspection, BOOL processValid, BOOL inspectionValid, BOOL tetherRunning) {
+    /* Fresh ownership evidence remains visible even if Tether is also
+     * running. This is a display gate; the running-client policy still
+     * prevents recovery and automatic lifecycle actions. */
+    if(inspectionValid && GuardianForeignInterfaceOwner(inspection)) return @"external_interface_owner";
     if(!processValid) return @"process_observation_unknown";
     if(!inspectionValid) return @"inspection_error";
     return GuardianInspectionReadiness(inspection,tetherRunning) ?: @"ready";
@@ -353,6 +383,7 @@ static NSString *GuardianLanguage(void) {
     BOOL forceRestart=self.canForce && self.quitRequested && !self.endingSession && ![self.quitPurpose isEqual:@"end"];
     self.publishedTetherObservationValid=processValid; self.publishedInspectionObservationValid=inspectionValid;
     NSString *gate=GuardianPublishedGate(self.inspection,processValid,inspectionValid,self.tetherRunning);
+    NSDictionary *foreignOwner=inspectionValid ? GuardianForeignInterfaceOwner(self.inspection) : nil;
     [self observeRecoveryGate:gate];
     NSMutableArray *visibleBlockers=[NSMutableArray array];
     if(inspectionValid) for(NSDictionary *app in self.blockingCameraApps)
@@ -366,6 +397,7 @@ static NSString *GuardianLanguage(void) {
         @"tether_observed_at":@(self.tetherObservedAt),@"inspection_observed_at":@(self.inspectionObservedAt),
         @"observation_monotonic_seconds":@(now),
         @"inspection_gate":gate,@"blocking_camera_apps":visibleBlockers,
+        @"external_interface_owner":@((BOOL)(foreignOwner!=nil)),@"external_interface_owner_info":foreignOwner ?: @{},
         @"capture_state":GuardianCaptureState(processValid,self.tetherRunning),@"shooting_verified":@NO,
         @"busy":@((BOOL)(self.task || self.quitRequested || self.launching || self.endingSession)),
         @"retry_count":@(self.retryCount),@"log_directory":self.logDirectory} mutableCopy];
@@ -381,6 +413,10 @@ static NSString *GuardianLanguage(void) {
      * failure. Passive/paused observations also do not create block events. */
     if(!self.desired || !self.pendingRecovery || (self.tetherObservationValid && self.tetherRunning) || [gate isEqual:@"tether_running"]) return;
     NSArray<NSDictionary *> *apps=[gate isEqual:@"camera_apps_running"] ? self.blockingCameraApps ?: @[] : @[];
+    if([gate isEqual:@"external_interface_owner"]) {
+        NSDictionary *owner=GuardianForeignInterfaceOwner(self.inspection);
+        if(owner) apps=@[@{@"identifier":@"external_interface_owner",@"pid":owner[@"pid"]}];
+    }
     NSMutableArray *parts=[NSMutableArray arrayWithObject:gate];
     for(NSDictionary *app in apps) [parts addObject:[NSString stringWithFormat:@"%@:%@",app[@"identifier"],app[@"pid"] ?: @"unknown"]];
     NSString *signature=[parts componentsJoinedByString:@";"];
@@ -403,7 +439,11 @@ static NSString *GuardianLanguage(void) {
 }
 - (void)publishRecoveryGate:(NSString *)reason {
     [self observeRecoveryGate:reason];
-    if([reason isEqual:@"camera_apps_running"] && self.blockingCameraApps.count) {
+    NSDictionary *owner=[reason isEqual:@"external_interface_owner"] ? GuardianForeignInterfaceOwner(self.inspection) : nil;
+    if(owner) {
+        [self publish:@"blocked" zh:[NSString stringWithFormat:@"检查时发现 %@ 占用相机接口。请正常退出该软件或释放相机，准备会自动继续；本工具不会结束它。",owner[@"name"]]
+            en:[NSString stringWithFormat:@"%@ was observed owning the camera interface. Quit it normally or release the camera; preparation will continue automatically. Guardian will not terminate it.",owner[@"name"]]];
+    } else if([reason isEqual:@"camera_apps_running"] && self.blockingCameraApps.count) {
         NSMutableArray *names=[NSMutableArray array];
         for(NSDictionary *app in self.blockingCameraApps) [names addObject:app[@"name"]];
         NSString *joined=[names componentsJoinedByString:@", "];
@@ -620,6 +660,8 @@ static NSString *GuardianLanguage(void) {
     }
     NSString *reason=GuardianInspectionReadiness(inspection,NO);
     if (reason) {
+        self.inspection=inspection; self.inspectionObservationValid=![reason isEqual:@"inspection_error"];
+        if(self.inspectionObservationValid) self.inspectionObservedAt=GuardianNow();
         self.blockingCameraApps=GuardianBlockingCameraApps(inspection); self.pendingRecovery=self.desired;
         [self publishRecoveryGate:reason]; return;
     }
@@ -644,7 +686,7 @@ static NSString *GuardianLanguage(void) {
                 } else { self.inspectionObservationValid=NO; self.blockingCameraApps=@[]; }
                 if(inspectStatus || gate ||
                     ![fresh[@"interface_registry_id"] isEqual:inspection[@"interface_registry_id"]]) {
-                    if(!inspectStatus && [gate isEqual:@"camera_apps_running"]) {
+                    if(!inspectStatus && ([@[@"camera_apps_running",@"external_interface_owner"] containsObject:gate])) {
                         /* The USB check succeeded. Another application is
                          * now present, so retain the requested handoff until
                          * it exits; this is not an I/O retry failure. */
@@ -668,7 +710,13 @@ static NSString *GuardianLanguage(void) {
     if (![self acceptGeneration:generation]) return;
     [self runHelper:@"s1h_camera_service" arguments:@[@"--inspect"] kind:@"inspect" timeout:2 completion:^(int status,NSDictionary *inspection,BOOL expired) {
         if (![self acceptGeneration:generation] || expired) return;
-        if(status || GuardianInspectionReadiness(inspection,NO) || ![inspection[@"restart_guard"] isEqual:@"opt_in_required"] ||
+        NSString *gate=GuardianInspectionReadiness(inspection,NO);
+        if(!status && [gate isEqual:@"external_interface_owner"]) {
+            self.inspection=inspection; self.inspectionObservationValid=YES; self.inspectionObservedAt=GuardianNow();
+            self.blockingCameraApps=GuardianBlockingCameraApps(inspection); self.pendingRecovery=self.desired; self.recoverAfter=GuardianNow()+1;
+            [self publishRecoveryGate:gate]; return;
+        }
+        if(status || gate || ![inspection[@"restart_guard"] isEqual:@"opt_in_required"] ||
             ![inspection[@"interface_registry_id"] isEqual:self.inspection[@"interface_registry_id"]]) {
             [self failRecovery:@"相机接口仍被占用，安全检查未允许重启服务。请关闭相机软件后重试。" en:@"The interface is busy and safety checks did not allow a service restart. Close camera applications and retry."]; return;
         }
@@ -676,8 +724,14 @@ static NSString *GuardianLanguage(void) {
         [self runHelper:@"s1h_camera_service" arguments:@[@"--restart-camera-service"] kind:@"service-restart" timeout:20 completion:^(int serviceStatus,NSDictionary *result,BOOL serviceExpired) {
             if (![self acceptGeneration:generation] || serviceExpired) return;
             NSDictionary *fresh=result[@"inspection"];
+            NSString *freshGate=GuardianInspectionReadiness(fresh,NO);
+            if([freshGate isEqual:@"external_interface_owner"]) {
+                self.inspection=fresh; self.inspectionObservationValid=YES; self.inspectionObservedAt=GuardianNow();
+                self.blockingCameraApps=GuardianBlockingCameraApps(fresh); self.pendingRecovery=self.desired; self.recoverAfter=GuardianNow()+1;
+                [self publishRecoveryGate:freshGate]; return;
+            }
             if(serviceStatus || ![@[@"released",@"not_needed"] containsObject:result[@"status"]] ||
-                GuardianInspectionReadiness(fresh,NO) || ![fresh[@"interface_registry_id"] isEqual:inspection[@"interface_registry_id"]]) {
+                freshGate || ![fresh[@"interface_registry_id"] isEqual:inspection[@"interface_registry_id"]]) {
                 [self failRecovery:@"相机服务未安全释放；已停止自动准备。" en:@"The camera service was not safely released; automatic preparation stopped."]; return;
             }
             [self repairWithInspection:fresh serviceRetried:YES generation:generation];

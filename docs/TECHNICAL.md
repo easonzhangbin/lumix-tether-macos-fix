@@ -217,7 +217,7 @@ The smallest candidate for retaining official Tether's UI is a stop/quit lifecyc
 
 ## Connection Guardian beta / 连接守护测试版
 
-Guardian 0.2.3 is the menu-bar beta described in the [project introduction](../README.md), with [source and usage](../experiments/connection-guardian/README.md). It retains the unmodified official Tether 2.12 UI for shooting, controls and original-file saving.
+Guardian 0.2.4 is the menu-bar beta described in the [project introduction](../README.md), with [source and usage](../experiments/connection-guardian/README.md). It retains the unmodified official Tether 2.12 UI for shooting, controls and original-file saving.
 
 Start explicitly enables bounded connection preparation while Tether is absent, including guarded current-user camera-service recovery when permitted. While Tether is known to be running, no new USB/PTP repair is started. Confirmed physical detach may request a normal quit only of the exact verified Tether instance Guardian launched. Reconnect also requests normal quit. Thirty seconds without exit enables a separate explicit force action; it never automatically forces Tether to quit.
 
@@ -225,11 +225,11 @@ End This Shoot disables recovery before waiting for an owned helper/launch to se
 
 The app uses local rotating JSONL event logs with timestamps, run/request IDs, action requests, outcomes and process-observation edges. Guardian launch requests and returned applications are distinct events; externally observed processes retain unknown origin. A returned app does not prove the request created that process. Event fields are restricted metadata; raw diagnostics and photographs are excluded from public artifacts.
 
-Current 0.2.3 build validation passed 310 hardware-free checks: 16 USB identity, 51 service guard, 50 event writer and 193 controller/policy tests. Controller fixtures exercise the actual asynchronous End/late callback paths with fake helper/process boundaries. Logger tests cover ordering, rotation, permissions and unsafe-file refusal. These checks do not prove real OS force-quit delivery, hot-plug or sleep/wake reliability. The failed 0.2.2/0.2.3 hot-plug observations are recorded below.
+Current 0.2.4 validation covers 347 hardware-free checks: 16 USB identity, 51 service guard, 50 event writer and 230 controller/policy tests. Controller fixtures exercise the actual asynchronous End/late callback paths with fake helper/process boundaries. Logger tests cover ordering, rotation, permissions and unsafe-file refusal. These checks do not prove real OS force-quit delivery, hot-plug or sleep/wake reliability. The failed 0.2.2/0.2.3 hot-plug observations are recorded below.
 
 A short Guardian recovery handoff was followed by actual official Tether preview and capture/save of one 6000×4000 RAW, 36,048,384 bytes. Pause retained the official process. End closed Tether normally; a six-second observation saw no automatic reopen. Long-duration work, repeated Guardian USB reconnects, sleep/wake and other hardware remain unverified.
 
-Guardian 0.2.3 是[项目介绍](../README.zh-CN.md)中的菜单栏测试版，[源码及用法](../experiments/connection-guardian/README.zh-CN.md)保持与其一致。拍摄、参数控制及原片保存由未修改的官方 Tether 2.12 完成。
+Guardian 0.2.4 是[项目介绍](../README.zh-CN.md)中的菜单栏测试版，[源码及用法](../experiments/connection-guardian/README.zh-CN.md)保持与其一致。拍摄、参数控制及原片保存由未修改的官方 Tether 2.12 完成。
 
 明确开始后，才在 Tether 未运行时进行有上限的连接准备，并在守卫允许时处理本用户的相机服务占用。已知 Tether 运行时不开始新的 USB／PTP 恢复。确认物理断开后，只可请求 Guardian 启动且身份仍一致的 Tether 正常退出；重新连接也先请求正常退出。30 秒未退出仅启用单独的明确强制操作，不会自动强杀。
 
@@ -237,7 +237,7 @@ Guardian 0.2.3 是[项目介绍](../README.zh-CN.md)中的菜单栏测试版，[
 
 本地 JSONL 事件日志记录时间、运行／请求编号、操作、结果和进程变化。守护器的启动请求与系统返回的应用分开记录；外部观察进程的来源保留未知，返回应用不等于已经证明该请求创建了进程。事件仅含受限制的元数据，公开产物不含原始诊断或照片。
 
-当前 0.2.3 构建的 310 项无硬件检查通过：设备身份 16、服务守卫 51、事件日志 50、控制器／策略 193。控制器使用模拟辅助程序和进程边界测试真实异步结束及迟到回调；日志测试覆盖顺序、轮转、权限及不安全目标拒绝。这些不能证明真实系统强制退出、拔插或睡眠唤醒可靠性。0.2.2／0.2.3 拔插失败的实测记录见下文。
+当前 0.2.4 无硬件验证共 347 项：设备身份 16、服务守卫 51、事件日志 50、控制器／策略 230。控制器使用模拟辅助程序和进程边界测试真实异步结束及迟到回调；日志测试覆盖顺序、轮转、权限及不安全目标拒绝。这些不能证明真实系统强制退出、拔插或睡眠唤醒可靠性。0.2.2／0.2.3 拔插失败的实测记录见下文。
 
 一次短测中，Guardian 恢复交接后，官方 Tether 预览正常，并拍摄保存一张 6000×4000 RAW（36,048,384 字节）。暂停保留了原厂进程；结束拍摄正常关闭 Tether，随后 6 秒未观察到自动重开。长时间拍摄、Guardian 反复拔插、睡眠唤醒及其他硬件仍待验证。
 
@@ -281,9 +281,9 @@ Opening the original Tether icon directly may use its saved language rather than
 
 直接打开原厂 Tether 图标可能使用已保存的语言，而不是当前系统首选语言。需要自动选择时，请从任一恢复脚本启动。
 
-Public artifacts contain the normal entry points `恢复S1H连接.command` and `Restore S1H Connection.command`, the explicit restart entry points `重启相机服务并恢复连接.command` and `Restart Camera Service and Restore.command`, and native helpers in `bin/`. The user installs official Tether 2.12 separately. The script searches `/Applications` and `~/Applications`, or accepts an explicit path through `--tether-app`. `--check` validates the setup without accessing the camera; `--diagnose` performs the read-only ownership inspection described above.
+The CLI folder built from source contains the normal entry points `恢复S1H连接.command` and `Restore S1H Connection.command`, the explicit restart entry points `重启相机服务并恢复连接.command` and `Restart Camera Service and Restore.command`, and native helpers in `bin/`. The user installs official Tether 2.12 separately. The script searches `/Applications` and `~/Applications`, or accepts an explicit path through `--tether-app`. `--check` validates the setup without accessing the camera; `--diagnose` performs the read-only ownership inspection described above.
 
-公开产物包含普通入口 `恢复S1H连接.command`、`Restore S1H Connection.command`，明确重启入口 `重启相机服务并恢复连接.command`、`Restart Camera Service and Restore.command`，以及 `bin/` 内的原生辅助程序。用户需单独安装官方 Tether 2.12。脚本搜索 `/Applications` 和 `~/Applications`，也接受 `--tether-app` 显式路径；`--check` 仅检查环境、不访问相机，`--diagnose` 执行上述只读占用诊断。
+源码构建的 CLI 目录包含普通入口 `恢复S1H连接.command`、`Restore S1H Connection.command`，明确重启入口 `重启相机服务并恢复连接.command`、`Restart Camera Service and Restore.command`，以及 `bin/` 内的原生辅助程序。用户需单独安装官方 Tether 2.12。脚本搜索 `/Applications` 和 `~/Applications`，也接受 `--tether-app` 显式路径；`--check` 仅检查环境、不访问相机，`--diagnose` 执行上述只读占用诊断。
 
 Panasonic binaries, artwork, Qt libraries and installer packages are excluded from public release artifacts and remain covered by their respective licenses.
 
@@ -330,3 +330,18 @@ Apple 的 [IOKit 头文件说明](https://github.com/apple-oss-distributions/IOK
 A later reattachment did enumerate at 5Gbps, but an externally observed Tether appeared before any Guardian preparation/launch request. Start while that process was running correctly observed only; official Tether remained unconnected. Normal quit then allowed guarded service release and strict recovery, followed by a verified Guardian launch and actual official live view. This is a distinct failure mode from an absent USB camera and does not establish who launched the external process.
 
 随后一次重新接入中，S1H 已枚举为 5Gbps，但在守护发出任何准备或启动请求前，已观察到外部来源未知的 Tether 进程。运行中点击开始守护只观察状态，官方程序仍未联机。正常退出后，守护完成有校验的服务释放及严格恢复，新启动的官方 Tether 随后实际显示实时画面。这与 USB 中完全没有相机是两种状态，日志不能确定外部进程由谁打开。
+
+
+## 0.2.4 confirmed external ownership / 已确认的外部占用
+
+A read-only observation identified NegPy as the confirmed interface owner while the known-camera-app list was empty. The earlier gate could therefore show preparation as ready. Version 0.2.4 adds a pure ownership gate based on fresh confirmed executable identity, not a running-app name. The exact system camera-service path and canonical installed official Tether executables are exempt from the third-party classification; this does not bypass the existing service-restart guard.
+
+Snapshots expose `external_interface_owner` and sanitized `external_interface_owner_info` (`name`, `pid`); `inspection_gate: external_interface_owner` takes precedence for presentation. The UI also requires fresh valid inspection and confirmed ownership before showing a red name. Unknown or expired evidence clears the name and red styling. A known app merely running remains a separate conservative blocker. The tested NegPy owner/recovery/help rows were visibly red with complete text while Guardian was paused; no camera action was performed by that check.
+
+Pending preparation waits for release without consuming its I/O retry budget. A running Tether still means observe-only, even after another app releases the interface; an explicit Reconnect requests normal quit first. External ownership never authorizes terminating that application. Current full build validation passed **347 hardware-free checks: 16 identity + 51 service + 50 event writer + 230 controller/policy**. The earlier 0.2.3 count of 310 remains a historical checkpoint. Physical hot-plug has not been retested on 0.2.4; the two earlier failures and unproven lockup cause remain applicable limits.
+
+一次只读观察确认 NegPy 实际持有接口，但已知相机软件列表为空，旧 gate 因此可能错误显示可准备。0.2.4 增加基于新鲜、已确认可执行文件身份的纯占用判定，不以运行软件名称推断占用。系统相机服务精确路径和默认安装位置的官方 Tether 可执行文件不按第三方归类，但不会绕过既有服务重启守卫。
+
+快照提供 `external_interface_owner` 及过滤后的 `external_interface_owner_info`（`name`、`pid`），提示用的 `inspection_gate: external_interface_owner` 优先。界面还要求检查新鲜有效、占用已确认，才显示红色名称；未知或过期会清除旧名称及红色。仅检测到已知软件运行仍是另一项保守拦截。实机已确认 NegPy 的占用／恢复／帮助三行均红色且文本完整，当时守护处于暂停状态，该检查未操作相机。
+
+等待释放时保留准备任务，不消耗 I/O 重试次数；即使其他软件释放，只要 Tether 仍运行就只观察，需要正常重启时明确选择重新连接。外部占用不授权结束该软件。当前完整构建 **347 项无硬件检查通过：身份 16 + 服务 51 + 事件日志 50 + 控制器／策略 230**；0.2.3 的 310 项保留为历史记录。0.2.4 尚未复测物理热拔插，先前两次失败及相机卡住根因未证的边界不变。
