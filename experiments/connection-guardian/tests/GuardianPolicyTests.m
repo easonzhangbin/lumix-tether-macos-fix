@@ -54,6 +54,7 @@ static NSDictionary *Changed(NSDictionary *base, NSString *key, id value) {
 @property(nonatomic,strong) NSDictionary *fakeIdentity;
 @property(nonatomic,strong) NSMutableArray<NSString *> *publishedStates;
 @property(nonatomic,strong) NSMutableArray<NSString *> *helperKinds;
+@property(nonatomic,strong) NSMutableArray<NSDictionary *> *helperRequests;
 @property(nonatomic,strong) NSMutableArray<GuardianFixtureTask *> *fakeTasks;
 @property(nonatomic,strong) NSMutableArray<NSDictionary *> *events;
 @property(nonatomic,copy) void (^helperCompletion)(int,NSDictionary *,BOOL);
@@ -68,7 +69,7 @@ static NSDictionary *Changed(NSDictionary *base, NSString *key, id value) {
     if((self=[super init])) {
         self.queue=dispatch_queue_create("guardian.test.fixture",DISPATCH_QUEUE_SERIAL);
         self.stopCompletions=[NSMutableArray array];
-        self.publishedStates=[NSMutableArray array]; self.helperKinds=[NSMutableArray array];
+        self.publishedStates=[NSMutableArray array]; self.helperKinds=[NSMutableArray array]; self.helperRequests=[NSMutableArray array];
         self.fakeTasks=[NSMutableArray array]; self.fakeObservationValid=YES;
         self.events=[NSMutableArray array];
         self.state=@"idle"; self.messageZH=@""; self.messageEN=@"";
@@ -90,10 +91,11 @@ static NSDictionary *Changed(NSDictionary *base, NSString *key, id value) {
 }
 - (void)runHelper:(NSString *)name arguments:(NSArray<NSString *> *)arguments kind:(NSString *)kind
           timeout:(double)timeout completion:(void (^)(int,NSDictionary *,BOOL))completion {
-    (void)name; (void)arguments; (void)timeout;
+    (void)timeout;
     Check(!self.task && !self.helperCompletion,"Fixture permits only one pending production helper");
     GuardianFixtureTask *task=[GuardianFixtureTask new];
     [self.fakeTasks addObject:task]; self.task=task; self.taskKind=kind;
+    [self.helperRequests addObject:@{@"name":name,@"arguments":[arguments copy],@"kind":kind}];
     [self.helperKinds addObject:kind]; self.helperCompletion=completion;
 }
 - (void)completeHelper:(int)status result:(NSDictionary *)result {
@@ -201,8 +203,9 @@ static void CheckActionAndLaunchEvents(NSDictionary *ready,NSDictionary *identit
 
     GuardianFixtureController *opened=Fixture(identity);
     [opened openTether]; Drain(opened);
-    Check(EventsNamed(opened,@"user_open_tether").count==1 && [opened.launchSource isEqual:@"directUserOpen"] && opened.launchRequests==1,
-        "Direct Open is distinguishable from recovery-triggered launch intent");
+    Check(EventsNamed(opened,@"user_open_tether").count==1 && [opened.recoverySource isEqual:@"afterOpenRecovery"] &&
+        opened.launchRequests==0 && [opened.helperKinds isEqual:@[@"inspect"]],
+        "Open records its intent and queues fresh inspection instead of bypassing recovery");
     GuardianFixtureController *reconnected=Fixture(identity); reconnected.fakePresent=YES;
     [reconnected reconnect]; Drain(reconnected);
     Check(EventsNamed(reconnected,@"user_reconnect").count==1 && [reconnected.recoverySource isEqual:@"afterReconnectRecovery"],
@@ -233,6 +236,147 @@ static void CheckActionAndLaunchEvents(NSDictionary *ready,NSDictionary *identit
     [absent endSession]; Drain(absent);
     Check(EventsNamed(absent,@"session_ended").count==1 && [EventsNamed(absent,@"session_ended")[0][@"observation"] isEqual:@"tether_absent"],
         "Ended is logged only with a reliable process-absence observation");
+}
+
+static NSUInteger BlockedFor(GuardianFixtureController *fixture,NSString *reason) {
+    NSUInteger count=0;
+    for(NSDictionary *fields in EventsNamed(fixture,@"recovery_blocked")) if([fields[@"reason"] isEqual:reason]) ++count;
+    return count;
+}
+static void CheckOpenRecoveryGate(NSDictionary *ready,NSDictionary *identity) {
+    NSDictionary *preview=Changed(ready,@"known_camera_apps",@[@{@"name":@"Preview",@"pid":@64956}]);
+    GuardianFixtureController *blocked=Fixture(identity);
+    blocked.inspection=ready; blocked.inspectionObservationValid=YES; blocked.inspectionObservedAt=GuardianNow()-10;
+    [blocked openTether]; Drain(blocked);
+    Check(blocked.desired && blocked.pendingRecovery && blocked.launchRequests==0 &&
+        [blocked.helperKinds isEqual:@[@"inspect"]],"Open cannot launch using stale cached readiness; it requests a new inspection");
+    dispatch_sync(blocked.queue,^{ [blocked completeHelper:0 result:preview]; });
+    Check(blocked.pendingRecovery && blocked.launchRequests==0 && blocked.helperKinds.count==1 && [blocked.state isEqual:@"blocked"],
+        "A running Preview blocks Open while retaining the requested recovery");
+    Check([blocked.messageEN containsString:@"Preview"] || [blocked.messageZH containsString:@"预览"],
+        "The blocked status identifies the detected application instead of a generic failure");
+    NSUInteger blockedCount=BlockedFor(blocked,@"camera_apps_running");
+    NSUInteger appEvents=EventsNamed(blocked,@"recovery_blocked_app").count;
+    NSDictionary *blockerEvent=EventsNamed(blocked,@"recovery_blocked").lastObject;
+    Check([blockerEvent[@"blocking_app"] isEqual:@"preview"] && [blockerEvent[@"blocking_app_count"] isEqual:@1],
+        "The persisted gate identifies Preview using a fixed identifier and a typed count");
+    dispatch_sync(blocked.queue,^{
+        for(unsigned i=0;i<100;++i) [blocked receiveInspection:preview status:0 expired:NO];
+    });
+    Check(blockedCount==1 && BlockedFor(blocked,@"camera_apps_running")==1 &&
+        EventsNamed(blocked,@"recovery_blocked_app").count==appEvents,
+        "Repeated Preview-blocked inspections log the reason and app once without flooding");
+    Check(blocked.pendingRecovery && blocked.launchRequests==0 && blocked.helperKinds.count==1,
+        "Blocked polling neither loses recovery intent nor starts USB work");
+    NSUInteger unblockedBefore=EventsNamed(blocked,@"recovery_unblocked").count;
+    dispatch_sync(blocked.queue,^{ blocked.recoverAfter=0; [blocked receiveInspection:ready status:0 expired:NO]; });
+    Check(EventsNamed(blocked,@"recovery_unblocked").count==unblockedBefore+1 &&
+        [blocked.helperKinds isEqual:@[@"inspect",@"repair"]] && blocked.launchRequests==0,
+        "Removing Preview resumes pending USB preparation and records the gate opening");
+    NSDictionary *repair=blocked.helperRequests.lastObject;
+    NSArray *arguments=repair[@"arguments"];
+    Check([repair[@"name"] isEqual:@"s1h_iousbhost_probe"] &&
+        [arguments containsObject:@"--drain-input"] && [arguments containsObject:@"--require-s1h"] &&
+        [arguments containsObject:@"--expected-interface-id"] && [arguments containsObject:@"123456"],
+        "Open uses the production strict S1H drain and expected-interface helper arguments");
+    dispatch_sync(blocked.queue,^{ [blocked completeHelper:0 result:@{}]; });
+    Check(blocked.launchRequests==0 && [blocked.helperKinds isEqual:@[@"inspect",@"repair",@"inspect"]],
+        "Even a successful probe must pass the fresh post-repair inspection before launch");
+    dispatch_sync(blocked.queue,^{ [blocked completeHelper:0 result:ready]; });
+    Check(blocked.launchRequests==1 && [blocked.launchSource isEqual:@"afterOpenRecovery"] && !blocked.pendingRecovery,
+        "Open launches once only after strict preparation and fresh inspection succeed");
+
+    GuardianFixtureController *failed=Fixture(identity);
+    [failed openTether]; Drain(failed);
+    dispatch_sync(failed.queue,^{
+        [failed completeHelper:0 result:ready]; failed.recoverAfter=0;
+        [failed receiveInspection:ready status:0 expired:NO]; [failed completeHelper:23 result:@{}];
+    });
+    Check(failed.launchRequests==0 && ![failed.helperKinds.lastObject isEqual:@"inspect"] && failed.retryCount==1,
+        "A failed drain is not converted into an Open launch");
+
+    GuardianFixtureController *postBlocked=Fixture(identity);
+    [postBlocked openTether]; Drain(postBlocked);
+    dispatch_sync(postBlocked.queue,^{
+        [postBlocked completeHelper:0 result:ready]; postBlocked.recoverAfter=0;
+        [postBlocked receiveInspection:ready status:0 expired:NO];
+        postBlocked.retryCount=2;
+    });
+    for(unsigned attempt=0;attempt<3;++attempt) {
+        dispatch_sync(postBlocked.queue,^{
+            [postBlocked completeHelper:0 result:@{}];
+            [postBlocked completeHelper:0 result:preview];
+        });
+        Check(postBlocked.launchRequests==0 && postBlocked.pendingRecovery && postBlocked.retryCount==2,
+            "Post-repair Preview arrival retains pending recovery without consuming an I/O failure retry");
+        NSUInteger helpersBefore=postBlocked.helperKinds.count;
+        dispatch_sync(postBlocked.queue,^{
+            for(unsigned i=0;i<20;++i) [postBlocked receiveInspection:preview status:0 expired:NO];
+        });
+        Check(postBlocked.helperKinds.count==helpersBefore && postBlocked.launchRequests==0,
+            "Repeated post-repair blocker observations never spin up another helper");
+        dispatch_sync(postBlocked.queue,^{ postBlocked.recoverAfter=0; [postBlocked receiveInspection:ready status:0 expired:NO]; });
+        Check(postBlocked.task && [postBlocked.taskKind isEqual:@"repair"] && postBlocked.launchRequests==0,
+            "Removing each post-repair blocker resumes preparation while keeping launch gated");
+    }
+    dispatch_sync(postBlocked.queue,^{
+        [postBlocked completeHelper:0 result:@{}]; [postBlocked completeHelper:0 result:ready];
+    });
+    Check(postBlocked.launchRequests==1 && postBlocked.retryCount==0 && !postBlocked.pendingRecovery,
+        "Three post-repair blockers can clear and complete one handoff without exhausting retries");
+
+    GuardianFixtureController *unknown=Fixture(identity);
+    [unknown openTether]; Drain(unknown);
+    dispatch_sync(unknown.queue,^{ [unknown completeHelper:1 result:nil]; });
+    Check(unknown.launchRequests==0 && unknown.helperKinds.count==1 && unknown.pendingRecovery,
+        "Inspector failure after Open preserves intent without claiming absence or launching");
+    GuardianFixtureController *invalid=Fixture(identity);
+    [invalid openTether]; Drain(invalid);
+    dispatch_sync(invalid.queue,^{ [invalid completeHelper:0 result:@{}]; });
+    Check(invalid.launchRequests==0 && invalid.helperKinds.count==1 && [invalid.state isEqual:@"inspection_error"],
+        "Malformed successful inspection cannot bypass the Open gate");
+    GuardianFixtureController *running=Fixture(identity); running.fakePresent=YES;
+    [running openTether]; Drain(running);
+    Check(running.launchRequests==0 && running.helperKinds.count==0 && running.normalQuitRequests==0,
+        "Open leaves an already-running Tether alone without preparation, second launch or quit");
+    GuardianFixtureController *unknownProcess=Fixture(identity); unknownProcess.fakeObservationValid=NO;
+    [unknownProcess openTether]; Drain(unknownProcess);
+    Check(unknownProcess.launchRequests==0 && ![unknownProcess.helperKinds containsObject:@"repair"] && unknownProcess.normalQuitRequests==0,
+        "Unknown process enumeration never authorizes Open to repair, launch or quit");
+    dispatch_sync(unknownProcess.queue,^{
+        if(unknownProcess.helperCompletion) [unknownProcess completeHelper:0 result:ready];
+        else [unknownProcess receiveInspection:ready status:0 expired:NO];
+    });
+    Check(!unknownProcess.tetherObservationValid && [unknownProcess.state isEqual:@"inspection_error"] && unknownProcess.launchRequests==0,
+        "A valid USB inspection with unknown process enumeration remains unknown instead of being labeled running");
+
+    NSArray *sanitized=GuardianBlockingCameraApps(Changed(ready,@"known_camera_apps",@[
+        @{@"name":@"Preview",@"pid":@64956,@"path":@"/private/user/document"},
+        @{@"name":@"/private/person/app",@"pid":@64957},
+        @{@"name":NSNull.null,@"pid":NSNull.null}
+    ]));
+    NSData *json=[NSJSONSerialization dataWithJSONObject:sanitized options:0 error:NULL];
+    NSString *text=json ? [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] : @"";
+    Check(json && ![text containsString:@"/private/"] && ![text containsString:@"document"] && [text containsString:@"Preview"],
+        "Visible blocker metadata uses fixed app labels and never echoes paths or arbitrary app names");
+    Check([GuardianPublishedGate(ready,YES,NO,NO) isEqual:@"inspection_error"] &&
+        [GuardianPublishedGate(ready,NO,YES,NO) isEqual:@"process_observation_unknown"],
+        "Expired inspector or unknown process observations publish unknown gate states instead of ready");
+    GuardianFixtureController *quiet=Fixture(identity); quiet.blockingCameraApps=GuardianBlockingCameraApps(preview);
+    dispatch_sync(quiet.queue,^{
+        quiet.desired=NO; quiet.pendingRecovery=YES;
+        for(unsigned i=0;i<100;++i) [quiet observeRecoveryGate:@"camera_apps_running"];
+        quiet.desired=YES; quiet.pendingRecovery=NO;
+        for(unsigned i=0;i<100;++i) [quiet observeRecoveryGate:@"camera_apps_running"];
+    });
+    Check(EventsNamed(quiet,@"recovery_blocked").count==0,
+        "Paused or nonpending observations never manufacture recovery-blocked log spam");
+    dispatch_sync(quiet.queue,^{
+        quiet.pendingRecovery=YES; quiet.tetherObservationValid=YES; quiet.tetherRunning=YES;
+        for(unsigned i=0;i<100;++i) [quiet observeRecoveryGate:@"camera_apps_running"];
+    });
+    Check(EventsNamed(quiet,@"recovery_blocked").count==0,
+        "An observed running Tether is never logged as a failed recovery merely because clients are present");
 }
 
 static void CheckEndTransitions(NSDictionary *ready, NSDictionary *identity) {
@@ -394,6 +538,7 @@ int main(void) {
         CheckEndTransitions(ready,identity);
         CheckObservationEvents(identity);
         CheckActionAndLaunchEvents(ready,identity);
+        CheckOpenRecoveryGate(ready,identity);
         Check(ForbiddenProcessCalls==0,"All exercised asynchronous paths remain inside fake process boundaries");
         printf("Guardian policy: %u checks, %u failures; production pure functions and fake asynchronous End paths; no hardware, app launch, real process enumeration or signals.\n", Checks, Failures);
         return Failures ? 1 : 0;

@@ -8,9 +8,13 @@
 
 An independent Apple Silicon menu-bar utility that prepares the S1H USB connection, hands it to official Tether 2.12, and watches connection and application lifecycles. Panasonic's application supplies live view, shooting, aperture, shutter, ISO, white balance and original-file saving. Guardian supplies connection recovery and a clear way to finish a session.
 
-[Download Guardian 0.2.1 beta](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.1) · [Source and detailed guide](experiments/connection-guardian/README.md) · [Earlier recovery scripts](docs/CLI.md)
+[Download Guardian 0.2.2 beta](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.2) · [Source and detailed guide](experiments/connection-guardian/README.md) · [Earlier recovery scripts](docs/CLI.md)
 
 This is a community beta tested on one S1H setup. It is not affiliated with Panasonic or Apple. Official Tether must be installed separately; the download contains this project's own app and helpers only.
+
+## 0.2.2 correction
+
+The pre-recovery check now names other camera clients that must quit normally, including Preview. A detected application is a conservative blocker, not proof that it owns the camera; actual interface ownership is shown separately. All Guardian launch entries check and prepare the connection while Tether is absent. Blocked and unblocked recovery states are logged.
 
 ## What it does
 
@@ -28,7 +32,7 @@ A physical disconnect may request normal quit of the exact verified Tether insta
 ## Install and use
 
 1. Install **official LUMIX Tether 2.12** from [Panasonic](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html), in `/Applications` or `~/Applications`.
-2. Download and extract the [Guardian beta ZIP](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.1). Move **LUMIX Connection Guardian.app** to your Applications folder.
+2. Download and extract the [Guardian beta ZIP](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.2). Move **LUMIX Connection Guardian.app** to your Applications folder.
 3. Close other camera/import applications. Connect the S1H with a data cable and select **PC(Tether)**.
 4. Open Guardian and click **Start Guardian**. In official Tether, select the camera, click **Start**, then **LV**. Confirm preview and take a test photo into your chosen destination.
 5. After capture and file transfer finish, click **End This Shoot**. Closing Guardian's status window keeps its menu-bar item available.
@@ -47,7 +51,7 @@ The app is locally ad-hoc signed and **not Developer ID notarized**. Another Mac
 | Actual shooting | After a Guardian recovery handoff, official live view worked and one 6000×4000 RAW was captured and saved: 36,048,384 bytes |
 | Camera controls | Aperture, shutter, ISO and color temperature were changed and restored separately in the official UI |
 | Session controls | Pause preserved Tether; End closed it normally with no automatic reopen in a short observation |
-| Automated checks | 236 passed: 16 USB identity, 43 service-guard, 49 event-log, 128 controller/policy checks; these use pure or fake environments |
+| Automated checks | 302 passed: 16 USB identity, 43 service-guard, 50 event-log, 193 controller/policy checks; these use pure or fake environments |
 
 Repeated Guardian hot-plug recovery, sleep/wake, long shoots, bursts, other Macs/macOS versions and other bodies remain unverified. **S1R, S1 and other models are not supported by this S1H beta's strict identity path.** arm64 only; the macOS 12 build target is not a claim that every later OS has been tested.
 

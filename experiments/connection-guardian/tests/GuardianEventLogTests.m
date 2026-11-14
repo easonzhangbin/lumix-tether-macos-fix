@@ -80,7 +80,7 @@ static void CheckFiltering(NSString *root) {
     NSString *directory=Directory(root,@"filtering");
     GuardianEventLog *log=[[GuardianEventLog alloc] initWithDirectory:[NSURL fileURLWithPath:directory isDirectory:YES]];
     [log recordEvent:@"privacy_test" fields:@{
-        @"source":@"safe_identifier",@"generation":@7,@"success":@YES,
+        @"source":@"safe_identifier",@"generation":@7,@"success":@YES,@"blocking_app":@"preview",@"blocking_app_count":@1,
         @"serial":@"PRIVATE-SERIAL",@"path":@"/private/photos/照片.RW2",@"email":@"private@example.invalid",
         @"nested":@{@"serial":@"SECRET"},@"payload":@"quote\"slash\\line\n中文",
         @"reason":@"含中文\nquote\"slash\\",@"request_source":@"bad/identifier",@"state":@"bad\nidentifier",
@@ -94,6 +94,8 @@ static void CheckFiltering(NSString *root) {
     if(entries.count==2) {
         NSDictionary *entry=Fields(entries[0]);
         Check([entry[@"source"] isEqual:@"safe_identifier"] && [entry[@"generation"] isEqual:@7] && [entry[@"success"] boolValue],"Allowlisted safe identifiers and typed values are retained");
+        Check([entry[@"blocking_app"] isEqual:@"preview"] && [entry[@"blocking_app_count"] isEqual:@1],
+            "A fixed blocker identifier and typed count survive event privacy filtering");
         BOOL absent=YES;
         for(NSString *key in @[@"serial",@"path",@"email",@"nested",@"payload",@"reason",@"request_source",@"state",@"phase",@"pid",@"exit_status",@"error_code"])
             absent &= entry[key]==nil;

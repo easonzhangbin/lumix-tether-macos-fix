@@ -13,18 +13,23 @@
 @property(nonatomic, strong) NSMenuItem *tetherItem;
 @property(nonatomic, strong) NSMenuItem *shootingItem;
 @property(nonatomic, strong) NSMenuItem *ownerItem;
+@property(nonatomic, strong) NSMenuItem *recoveryItem;
 @property(nonatomic, strong) NSMenuItem *endItem;
 @property(nonatomic, strong) NSMenuItem *startItem;
 @property(nonatomic, strong) NSMenuItem *pauseItem;
 @property(nonatomic, strong) NSMenuItem *reconnectItem;
 @property(nonatomic, strong) NSMenuItem *forceItem;
 @property(nonatomic, strong) NSMenuItem *openItem;
+@property(nonatomic, strong) NSMenuItem *mainOpenItem;
 @property(nonatomic, strong) NSMenuItem *logsItem;
 @property(nonatomic, strong) NSMenuItem *quitItem;
 @property(nonatomic, strong) NSWindow *statusWindow;
 @property(nonatomic, strong) NSTextField *windowUSB;
 @property(nonatomic, strong) NSTextField *windowTether;
 @property(nonatomic, strong) NSTextField *windowShooting;
+@property(nonatomic, strong) NSTextField *windowOwner;
+@property(nonatomic, strong) NSTextField *windowRecovery;
+@property(nonatomic, strong) NSTextField *windowRecoveryHelp;
 @property(nonatomic, strong) NSTextField *windowGuardian;
 @property(nonatomic, strong) NSButton *windowStart;
 @property(nonatomic, strong) NSButton *windowEnd;
@@ -83,6 +88,7 @@
     self.tetherItem = [self informationItem:@""];
     self.shootingItem = [self informationItem:@""];
     self.ownerItem = [self informationItem:@""];
+    self.recoveryItem = [self informationItem:@""];
     [self.menu addItem:NSMenuItem.separatorItem];
     self.endItem = [self actionItem:[self text:@"结束本次拍摄" english:@"End This Shooting Session"] action:@selector(endSession:)];
     self.endItem.attributedTitle = [[NSAttributedString alloc] initWithString:self.endItem.title
@@ -100,7 +106,7 @@
     self.forceItem = [self actionItem:[self text:@"强制重启 Tether（退出已超时）" english:@"Force Restart Tether (Quit Timed Out)"] action:@selector(forceAction:)];
     self.forceItem.toolTip = [self text:@"仅在正常退出超时后，由你明确选择强制重启。" english:@"Available only after normal quit times out; never performed automatically."];
     [self.menu addItem:NSMenuItem.separatorItem];
-    self.openItem = [self actionItem:[self text:@"打开官方 LUMIX Tether" english:@"Open Official LUMIX Tether"] action:@selector(openTether:)];
+    self.openItem = [self actionItem:[self text:@"检查连接并打开 Tether" english:@"Check Connection and Open Tether"] action:@selector(openTether:)];
     [self actionItem:[self text:@"查看连接状态…" english:@"Show Connection Status…"] action:@selector(showStatus:)];
     self.logsItem = [self actionItem:[self text:@"显示诊断与日志文件夹" english:@"Show Diagnostics and Logs Folder"] action:@selector(showLogs:)];
     [self.menu addItem:NSMenuItem.separatorItem];
@@ -134,18 +140,26 @@
     return label;
 }
 - (void)createStatusWindow {
-    self.statusWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 300)
+    self.statusWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 660, 420)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
         backing:NSBackingStoreBuffered defer:NO];
     self.statusWindow.title = [self text:@"LUMIX 连接状态" english:@"LUMIX Connection Status"];
     self.statusWindow.releasedWhenClosed = NO;
-    self.windowUSB = [self windowLabel:NSMakeRect(22, 252, 616, 24)];
-    self.windowTether = [self windowLabel:NSMakeRect(22, 216, 616, 24)];
-    self.windowShooting = [self windowLabel:NSMakeRect(22, 180, 616, 24)];
+    self.windowUSB = [self windowLabel:NSMakeRect(22, 372, 616, 24)];
+    self.windowTether = [self windowLabel:NSMakeRect(22, 340, 616, 24)];
+    self.windowShooting = [self windowLabel:NSMakeRect(22, 308, 616, 24)];
     self.windowShooting.font = [NSFont boldSystemFontOfSize:14];
-    self.windowGuardian = [self windowLabel:NSMakeRect(22, 90, 616, 74)];
+    self.windowOwner = [self windowLabel:NSMakeRect(22, 276, 616, 24)];
+    self.windowRecovery = [self windowLabel:NSMakeRect(22, 244, 616, 24)];
+    self.windowRecovery.font = [NSFont boldSystemFontOfSize:14];
+    self.windowRecoveryHelp = [self windowLabel:NSMakeRect(22, 196, 616, 38)];
+    self.windowRecoveryHelp.font = [NSFont systemFontOfSize:12];
+    self.windowRecoveryHelp.lineBreakMode = NSLineBreakByWordWrapping;
+    self.windowRecoveryHelp.maximumNumberOfLines = 2;
+    self.windowRecoveryHelp.textColor = NSColor.secondaryLabelColor;
+    self.windowGuardian = [self windowLabel:NSMakeRect(22, 88, 616, 94)];
     self.windowGuardian.lineBreakMode = NSLineBreakByWordWrapping;
-    self.windowGuardian.maximumNumberOfLines = 4;
+    self.windowGuardian.maximumNumberOfLines = 5;
     self.windowGuardian.textColor = NSColor.secondaryLabelColor;
     self.windowStart = [NSButton buttonWithTitle:[self text:@"开始守护" english:@"Start Guardian"] target:self action:@selector(start:)];
     self.windowStart.frame = NSMakeRect(22, 24, 184, 32);
@@ -164,9 +178,12 @@
     NSMenuItem *appItem = [NSMenuItem new];
     [mainMenu addItem:appItem];
     NSMenu *appMenu = [NSMenu new];
+    appMenu.autoenablesItems = NO;
     NSMenuItem *status = [appMenu addItemWithTitle:[self text:@"查看连接状态…" english:@"Show Connection Status…"]
         action:@selector(showStatus:) keyEquivalent:@""];
     status.target = self;
+    self.mainOpenItem = [appMenu addItemWithTitle:self.openItem.title action:@selector(openTether:) keyEquivalent:@"o"];
+    self.mainOpenItem.target = self;
     [appMenu addItem:NSMenuItem.separatorItem];
     NSMenuItem *quit = [appMenu addItemWithTitle:[self text:@"退出 LUMIX 连接守护" english:@"Quit LUMIX Connection Guardian"]
         action:@selector(quit:) keyEquivalent:@"q"];
@@ -190,6 +207,25 @@
     if (![inspection isKindOfClass:NSDictionary.class]) return @{};
     id nested = inspection[@"inspection"];
     return [nested isKindOfClass:NSDictionary.class] ? nested : inspection;
+}
+- (NSArray<NSString *> *)blockingCameraNames {
+    id applications = self.snapshot[@"blocking_camera_apps"];
+    if (![applications isKindOfClass:NSArray.class]) return @[];
+    NSDictionary *labels = @{
+        @"Preview": [self text:@"预览" english:@"Preview"],
+        @"Image Capture": [self text:@"图像捕捉" english:@"Image Capture"],
+        @"Photos": [self text:@"照片" english:@"Photos"],
+        @"Other camera application": [self text:@"其他相机软件" english:@"Other Camera Application"]
+    };
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (id application in applications) {
+        if (![application isKindOfClass:NSDictionary.class]) continue;
+        NSString *name = [self string:application[@"name"]];
+        if (!name.length || [name isEqualToString:@"LUMIX Tether"]) continue;
+        NSString *displayName = labels[name] ?: name;
+        if (![names containsObject:displayName]) [names addObject:displayName];
+    }
+    return names;
 }
 - (NSString *)phaseText {
     if (self.terminating) return [self text:@"正在退出守护工具…" english:@"Stopping Guardian…"];
@@ -315,8 +351,45 @@
     if ([owner isEqualToString:@"ptpcamerad"]) owner = [self text:@"系统相机服务" english:@"System Camera Service"];
     if (!inspectionValid) owner = [self text:@"暂时无法确认" english:@"State Is Unknown"];
     else if ([ownerState isEqualToString:@"none"]) owner = [self text:@"无占用记录" english:@"No Owner Recorded"];
+    else if (![ownerState isEqualToString:@"confirmed"]) owner = [self text:@"暂时无法确认" english:@"State Is Unknown"];
     else if (!owner.length) owner = [self text:@"尚未确认" english:@"Not Yet Confirmed"];
     [self setInfo:self.ownerItem text:[NSString stringWithFormat:[self text:@"接口占用：%@" english:@"Interface Owner: %@"], owner]];
+    self.ownerItem.toolTip = [self text:@"这是 USB 接口注册记录，与下方运行应用检查是两项独立信息。运行着“预览”不等于它已占用接口。"
+        english:@"This is USB interface registry evidence, separate from the running-app check below. A running Preview process does not establish USB ownership."];
+    NSArray<NSString *> *blockers = inspectionValid ? [self blockingCameraNames] : @[];
+    NSString *gate = [self string:self.snapshot[@"inspection_gate"]];
+    NSString *recovery = [self text:@"状态尚未确认" english:@"State Not Yet Confirmed"];
+    NSString *recoveryHelp = [self text:@"恢复前会检查运行中的相机／导入软件；不会自动结束这些应用或丢弃未保存内容。"
+        english:@"Preparation checks running camera/import apps; Guardian will not force-quit them or discard unsaved work."];
+    if (!inspectionValid) {
+        recoveryHelp = [self text:@"等待新的只读检查；过期或失败的检查不能证明没有其他相机软件运行。"
+            english:@"Waiting for a fresh read-only check. An expired or failed check cannot establish that other camera apps are closed."];
+    } else if (blockers.count) {
+        NSString *allNames = [blockers componentsJoinedByString:[self text:@"、" english:@", "]];
+        NSArray<NSString *> *shortNames = blockers.count > 2 ? [blockers subarrayWithRange:NSMakeRange(0, 2)] : blockers;
+        NSString *summary = [shortNames componentsJoinedByString:[self text:@"、" english:@", "]];
+        if (blockers.count > 2) summary = [summary stringByAppendingFormat:[self text:@"等 %lu 个应用" english:@" + %lu More"],
+            (unsigned long)(self.chinese ? blockers.count : blockers.count - 2)];
+        recovery = [NSString stringWithFormat:[self text:@"请先退出 %@" english:@"Quit %@ First"], summary];
+        recoveryHelp = [NSString stringWithFormat:[self text:@"请正常退出 %@；已请求的连接准备会在检查通过后继续，不会自动强退或丢弃未保存内容。"
+            english:@"Quit %@ normally. Pending preparation continues after checks pass; Guardian will not force-quit apps or discard unsaved work."], allNames];
+    } else if ([gate isEqualToString:@"tether_running"] || (tetherValid && tetherRunning)) {
+        recovery = [self text:@"Tether 运行中，仅观察状态" english:@"Tether Running; Observing Only"];
+    } else if ([gate isEqualToString:@"ready"]) {
+        recovery = [self text:@"可进行连接准备" english:@"Ready for Connection Preparation"];
+    } else if ([gate isEqualToString:@"camera_apps_running"]) {
+        recovery = [self text:@"请先退出相机或导入软件" english:@"Quit Camera or Import Apps First"];
+    } else if ([gate isEqualToString:@"no_device"]) {
+        recovery = [self text:@"等待相机 USB 连接" english:@"Waiting for Camera USB"];
+    } else if ([gate isEqualToString:@"other_camera"] || [gate isEqualToString:@"ambiguous_device"]) {
+        recovery = [self text:@"请确认只连接一台受支持的 S1H" english:@"Connect Only One Supported S1H"];
+    } else if ([gate isEqualToString:@"process_observation_unknown"] || [gate isEqualToString:@"inspection_error"]) {
+        recovery = [self text:@"状态暂时无法确认" english:@"State Is Unknown"];
+    } else {
+        recovery = [self text:@"暂未满足恢复条件，请查看提示" english:@"Recovery Checks Not Ready; See Details"];
+    }
+    [self setInfo:self.recoveryItem text:[NSString stringWithFormat:[self text:@"恢复前检查：%@" english:@"Recovery Check: %@"], recovery]];
+    self.recoveryItem.toolTip = recoveryHelp;
     self.startItem.title = desired ? [self text:@"保持 Tether 运行" english:@"Keep Tether Running"]
         : (ended ? [self text:@"开始新一次拍摄并守护" english:@"Start a New Session and Guardian"]
             : [self text:@"开始守护并打开 Tether" english:@"Start Guardian and Open Tether"]);
@@ -345,6 +418,17 @@
         english:@"Requires a separate explicit action after normal quit times out. Ending a session does not reopen Tether."];
     self.forceItem.enabled = !self.terminating && (forceQuit || forceRestart);
     self.openItem.enabled = !self.terminating && !busy && !ending;
+    self.openItem.title = tetherValid && tetherRunning
+        ? [self text:@"检查 Tether 状态（进程已运行）" english:@"Check Tether Status (Process Running)"]
+        : [self text:@"检查连接并打开 Tether" english:@"Check Connection and Open Tether"];
+    self.openItem.toolTip = tetherValid && tetherRunning
+        ? [self text:@"只观察现有进程及 USB 状态，不重新启动、不访问相机，也不判定实际拍摄连接。"
+            english:@"Observe the existing process and USB only; do not relaunch, open the camera or certify a shooting connection."]
+        : [self text:@"先检查并准备连接，成功后才打开 Tether。若“预览”等软件运行，请正常退出后等待继续。"
+            english:@"Check and prepare the connection before opening Tether. Quit Preview or other detected apps normally, then wait for preparation to continue."];
+    self.mainOpenItem.title = self.openItem.title;
+    self.mainOpenItem.enabled = self.openItem.enabled;
+    self.mainOpenItem.toolTip = self.openItem.toolTip;
     NSString *logDirectory = [self string:self.snapshot[@"log_directory"]];
     self.logsItem.enabled = !self.terminating && logDirectory.isAbsolutePath;
     self.quitItem.enabled = !self.terminating;
@@ -355,6 +439,12 @@
     self.windowTether.toolTip = self.tetherItem.toolTip;
     self.windowShooting.stringValue = self.shootingItem.title;
     self.windowShooting.toolTip = self.shootingItem.toolTip;
+    self.windowOwner.stringValue = self.ownerItem.title;
+    self.windowOwner.toolTip = self.ownerItem.toolTip;
+    self.windowRecovery.stringValue = self.recoveryItem.title;
+    self.windowRecovery.toolTip = recoveryHelp;
+    self.windowRecoveryHelp.stringValue = recoveryHelp;
+    self.windowRecoveryHelp.toolTip = recoveryHelp;
     self.windowGuardian.stringValue = [NSString stringWithFormat:[self text:@"守护状态：%@\n%@" english:@"Guardian: %@\n%@"], phase, message];
     self.windowGuardian.toolTip = self.windowGuardian.stringValue;
     self.windowStart.enabled = self.startItem.enabled;

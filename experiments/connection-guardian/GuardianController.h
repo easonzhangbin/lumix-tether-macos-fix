@@ -7,6 +7,8 @@ NS_ASSUME_NONNULL_BEGIN
  * device_present, tether_running, can_force_restart, can_force_quit,
  * ending_session, session_ended, tether_observation_valid,
  * inspection_observation_valid, capture_state, shooting_verified, busy, retry_count,
+ * inspection_gate (fixed reason or ready), blocking_camera_apps (safe name,
+ * identifier and optional PID; presence does not prove USB ownership),
  * log_directory; inspection contains the last read-only service snapshot.
  * start is explicit opt-in to bounded service recovery while Tether is absent.
  * pause/stopTool leave Tether alone. Reconnect first requests normal quit.
@@ -14,6 +16,8 @@ NS_ASSUME_NONNULL_BEGIN
  * then requests a verified normal Tether quit and remains passive. Timeout
  * needs separate forceQuit consent. No automatic force or session relaunch.
  * capture_state never certifies shooting readiness; running Tether is unknown.
+ * openTether observes an existing process. If absent, it schedules the same
+ * fresh inspection and verified USB preparation as recovery before launch.
  */
 @interface GuardianController : NSObject
 - (instancetype)initWithResourceDirectory:(NSURL *)directory

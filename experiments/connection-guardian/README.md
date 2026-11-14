@@ -4,9 +4,13 @@
 
 A menu-bar connection supervisor for DC-S1H. Separately installed official LUMIX Tether 2.12 retains shooting, exposure controls, white balance and original-file saving. This utility prepares the connection, monitors USB changes and coordinates application restarts.
 
-This is **Guardian 0.2.1 community beta**, published as [guardian-v0.2.1](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.1). A previous single Guardian recovery handoff was followed by official Tether preview and a saved 6000×4000 RAW (36,048,384 bytes). Aperture, shutter, ISO and color-temperature controls were verified separately in the official UI. These short checks do not establish repeated hot-plug, sleep/wake or long-duration reliability.
+This is **Guardian 0.2.2 community beta**, published as [guardian-v0.2.2](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.2). A previous single Guardian recovery handoff was followed by official Tether preview and a saved 6000×4000 RAW (36,048,384 bytes). Aperture, shutter, ISO and color-temperature controls were verified separately in the official UI. These short checks do not establish repeated hot-plug, sleep/wake or long-duration reliability.
 
-The app provides End This Shoot and separates USB detection, the Tether process and the shooting-connection state. Version 0.2.1 adds bounded local event logs for troubleshooting. Confirm shooting inside Tether: a present USB device, recorded interface owner or running process never establishes that capture is working.
+The app provides End This Shoot and separates USB detection, the Tether process and the shooting-connection state. Version 0.2.2 adds bounded local event logs for troubleshooting. Confirm shooting inside Tether: a present USB device, recorded interface owner or running process never establishes that capture is working.
+
+## 0.2.2 correction
+
+A separate pre-recovery check names detected camera clients such as Preview, without claiming they actually own the interface. The actual owner is shown separately. Checking and opening Tether now uses the preparation chain while Tether is absent; blocked and unblocked states are recorded locally.
 
 ## Use
 

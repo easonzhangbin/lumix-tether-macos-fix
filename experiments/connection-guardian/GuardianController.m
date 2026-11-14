@@ -51,11 +51,11 @@ static NSDictionary *GuardianSafeEventFields(NSDictionary *fields) {
     if(![fields isKindOfClass:NSDictionary.class]) return @{};
     NSSet *strings=[NSSet setWithArray:@[@"source",@"request_source",@"result",@"reason",@"state",@"previous_state",
         @"helper_kind",@"purpose",@"quit_purpose",@"phase",@"trigger",@"mode",@"app_version",@"attempt_id",
-        @"launch_attempt_id",@"helper_attempt_id",@"session_id",@"correlation_id",@"observation",@"verification",@"error_domain"]];
+        @"launch_attempt_id",@"helper_attempt_id",@"session_id",@"correlation_id",@"observation",@"verification",@"error_domain",@"blocking_app"]];
     NSSet *numbers=[NSSet setWithArray:@[@"pid",@"tether_pid",@"previous_pid",@"start_seconds",@"start_microseconds",
         @"exit_status",@"error_code",@"generation",@"retry_count",@"duration_ms",@"usb_link_speed_bps",@"device_count",
         @"interface_count",@"expired",@"initial",@"verified",@"success",@"accepted",@"desired_running",@"ending_session",
-        @"session_ended",@"tether_running",@"stopping",@"busy",@"normal_quit_delivered",@"already_running",@"observed"]];
+        @"session_ended",@"tether_running",@"stopping",@"busy",@"normal_quit_delivered",@"already_running",@"observed",@"blocking_app_count"]];
     NSCharacterSet *unsafe=[[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-"] invertedSet];
     NSMutableDictionary *safe=[NSMutableDictionary dictionary];
     for(NSString *key in fields) {
@@ -88,6 +88,44 @@ static NSString *GuardianInspectionReadiness(NSDictionary *inspection, BOOL teth
         [inspection[@"interface_registry_id"] unsignedLongLongValue] == 0) return @"ambiguous_device";
     if ([inspection[@"other_usb_ptp_interfaces"] count]) return @"other_camera";
     return nil;
+}
+static NSArray<NSDictionary *> *GuardianBlockingCameraApps(NSDictionary *inspection) {
+    id rows=[inspection isKindOfClass:NSDictionary.class] ? inspection[@"known_camera_apps"] : nil;
+    if(![rows isKindOfClass:NSArray.class]) return @[];
+    NSDictionary *known=@{
+        @"lumix tether":@[@"LUMIX Tether",@"lumix_tether"], @"lumixtether":@[@"LUMIX Tether",@"lumix_tether"],
+        @"preview":@[@"Preview",@"preview"], @"image capture":@[@"Image Capture",@"image_capture"],
+        @"photos":@[@"Photos",@"photos"], @"capture one":@[@"Capture One",@"capture_one"],
+        @"adobe lightroom classic":@[@"Adobe Lightroom Classic",@"lightroom_classic"],
+        @"gphoto2":@[@"gphoto2",@"gphoto2"], @"ptpcam":@[@"ptpcam",@"ptpcam"],
+        @"ptpcamera":@[@"PTPCamera",@"ptpcamera"], @"s1h_ptp_probe":@[@"S1H PTP Probe",@"s1h_ptp_probe"],
+        @"s1h_iousbhost_probe":@[@"S1H USB Recovery",@"s1h_usb_recovery"]};
+    NSMutableArray *result=[NSMutableArray array]; NSMutableSet *seen=[NSMutableSet set];
+    for(id row in rows) {
+        if(![row isKindOfClass:NSDictionary.class]) continue;
+        id raw=row[@"name"];
+        NSString *name=[raw isKindOfClass:NSString.class] ? [raw lowercaseString] : @"";
+        NSArray *label=known[name];
+        if(!label && [name hasPrefix:@"capture one "] && ![name containsString:@"/"]) label=known[@"capture one"];
+        if(!label && [name hasPrefix:@"adobe lightroom classic "] && ![name containsString:@"/"]) label=known[@"adobe lightroom classic"];
+        if(!label) label=@[@"Other camera application",@"other_camera_app"];
+        NSMutableDictionary *item=[@{@"name":label[0],@"identifier":label[1]} mutableCopy];
+        id pid=row[@"pid"];
+        if([pid isKindOfClass:NSNumber.class] && isfinite([pid doubleValue]) && floor([pid doubleValue])==[pid doubleValue] &&
+            [pid doubleValue]>=2 && [pid doubleValue]<=INT_MAX) item[@"pid"]=pid;
+        NSString *key=[NSString stringWithFormat:@"%@:%@",item[@"identifier"],item[@"pid"] ?: @"unknown"];
+        if(![seen containsObject:key]) { [seen addObject:key]; [result addObject:item]; }
+    }
+    [result sortUsingComparator:^NSComparisonResult(NSDictionary *a,NSDictionary *b) {
+        NSComparisonResult order=[a[@"identifier"] compare:b[@"identifier"]];
+        return order==NSOrderedSame ? [a[@"pid"] ?: @0 compare:b[@"pid"] ?: @0] : order;
+    }];
+    return result;
+}
+static NSString *GuardianPublishedGate(NSDictionary *inspection, BOOL processValid, BOOL inspectionValid, BOOL tetherRunning) {
+    if(!processValid) return @"process_observation_unknown";
+    if(!inspectionValid) return @"inspection_error";
+    return GuardianInspectionReadiness(inspection,tetherRunning) ?: @"ready";
 }
 static NSDictionary *GuardianProcessIdentity(pid_t pid) {
     if (pid <= 1) return nil;
@@ -203,6 +241,10 @@ static NSString *GuardianLanguage(void) {
 @property(nonatomic) BOOL processObservationErrorLogged;
 @property(nonatomic,strong) NSDictionary *observedProcessIdentity;
 @property(nonatomic,strong) NSDictionary *inspection;
+@property(nonatomic,strong) NSArray<NSDictionary *> *blockingCameraApps;
+@property(nonatomic,copy) NSString *lastRecoveryGate;
+@property(nonatomic,copy) NSString *lastRecoveryGateSignature;
+@property(nonatomic,strong) NSArray<NSDictionary *> *lastRecoveryGateApps;
 @property(nonatomic,strong) NSDictionary *quitIdentity;
 @property(nonatomic,strong) NSDictionary *ownedIdentity;
 @property(nonatomic,strong) NSMutableArray<dispatch_block_t> *stopCompletions;
@@ -242,6 +284,8 @@ static NSString *GuardianLanguage(void) {
 - (void)receiveLaunchResult:(NSDictionary *)verifiedIdentity success:(BOOL)success generation:(uint64_t)generation;
 - (void)recordEvent:(NSString *)event fields:(NSDictionary *)fields;
 - (void)observeTetherPresence:(BOOL)present observationValid:(BOOL)valid identity:(NSDictionary *)identity;
+- (void)observeRecoveryGate:(NSString *)reason;
+- (void)publishRecoveryGate:(NSString *)reason;
 @end
 
 @implementation GuardianController
@@ -308,6 +352,11 @@ static NSString *GuardianLanguage(void) {
     BOOL forceEnd=self.canForce && self.quitRequested && self.endingSession && [self.quitPurpose isEqual:@"end"];
     BOOL forceRestart=self.canForce && self.quitRequested && !self.endingSession && ![self.quitPurpose isEqual:@"end"];
     self.publishedTetherObservationValid=processValid; self.publishedInspectionObservationValid=inspectionValid;
+    NSString *gate=GuardianPublishedGate(self.inspection,processValid,inspectionValid,self.tetherRunning);
+    [self observeRecoveryGate:gate];
+    NSMutableArray *visibleBlockers=[NSMutableArray array];
+    if(inspectionValid) for(NSDictionary *app in self.blockingCameraApps)
+        if(!(processValid && self.tetherRunning && [app[@"identifier"] isEqual:@"lumix_tether"])) [visibleBlockers addObject:app];
     NSMutableDictionary *snapshot=[@{@"state":state,@"message_zh":zh,@"message_en":en,
         @"desired_running":@(self.desired),@"device_present":@(self.devicePresent),
         @"tether_running":@(self.tetherRunning),@"can_force_restart":@(forceRestart),@"can_force_quit":@(forceEnd),
@@ -316,6 +365,7 @@ static NSString *GuardianLanguage(void) {
         @"tether_observation_valid":@(processValid),@"inspection_observation_valid":@(inspectionValid),
         @"tether_observed_at":@(self.tetherObservedAt),@"inspection_observed_at":@(self.inspectionObservedAt),
         @"observation_monotonic_seconds":@(now),
+        @"inspection_gate":gate,@"blocking_camera_apps":visibleBlockers,
         @"capture_state":GuardianCaptureState(processValid,self.tetherRunning),@"shooting_verified":@NO,
         @"busy":@((BOOL)(self.task || self.quitRequested || self.launching || self.endingSession)),
         @"retry_count":@(self.retryCount),@"log_directory":self.logDirectory} mutableCopy];
@@ -324,6 +374,45 @@ static NSString *GuardianLanguage(void) {
     if ([speed isKindOfClass:NSNumber.class]) snapshot[@"usb_link_speed_bps"]=speed;
     void (^handler)(NSDictionary *)=self.onUpdate;
     dispatch_async(dispatch_get_main_queue(),^{ if (handler) handler(snapshot); });
+}
+- (void)observeRecoveryGate:(NSString *)reason {
+    NSString *gate=reason ?: @"ready";
+    /* A working Tether process is the intended handoff, not a recovery
+     * failure. Passive/paused observations also do not create block events. */
+    if(!self.desired || !self.pendingRecovery || (self.tetherObservationValid && self.tetherRunning) || [gate isEqual:@"tether_running"]) return;
+    NSArray<NSDictionary *> *apps=[gate isEqual:@"camera_apps_running"] ? self.blockingCameraApps ?: @[] : @[];
+    NSMutableArray *parts=[NSMutableArray arrayWithObject:gate];
+    for(NSDictionary *app in apps) [parts addObject:[NSString stringWithFormat:@"%@:%@",app[@"identifier"],app[@"pid"] ?: @"unknown"]];
+    NSString *signature=[parts componentsJoinedByString:@";"];
+    if([signature isEqual:self.lastRecoveryGateSignature]) return;
+    NSString *previous=self.lastRecoveryGate;
+    NSArray *previousApps=self.lastRecoveryGateApps ?: @[];
+    self.lastRecoveryGate=gate; self.lastRecoveryGateSignature=signature; self.lastRecoveryGateApps=apps;
+    if([gate isEqual:@"ready"]) {
+        if(previous && ![previous isEqual:@"ready"]) [self recordEvent:@"recovery_unblocked" fields:@{
+            @"reason":previous,@"blocking_app_count":@0,@"blocking_app":previousApps.count==1 ? previousApps[0][@"identifier"] : @"none"}];
+        return;
+    }
+    [self recordEvent:@"recovery_blocked" fields:@{@"reason":gate,@"blocking_app_count":@(apps.count),
+        @"blocking_app":apps.count==1 ? apps[0][@"identifier"] : apps.count ? @"multiple" : @"none"}];
+    if(apps.count>1) for(NSDictionary *app in apps) {
+        NSMutableDictionary *fields=[@{@"reason":gate,@"blocking_app_count":@(apps.count),@"blocking_app":app[@"identifier"]} mutableCopy];
+        if(app[@"pid"]) fields[@"pid"]=app[@"pid"];
+        [self recordEvent:@"recovery_blocked_app" fields:fields];
+    }
+}
+- (void)publishRecoveryGate:(NSString *)reason {
+    [self observeRecoveryGate:reason];
+    if([reason isEqual:@"camera_apps_running"] && self.blockingCameraApps.count) {
+        NSMutableArray *names=[NSMutableArray array];
+        for(NSDictionary *app in self.blockingCameraApps) [names addObject:app[@"name"]];
+        NSString *joined=[names componentsJoinedByString:@", "];
+        [self publish:@"blocked" zh:[NSString stringWithFormat:@"检测到 %@ 正在运行。请正常退出后，连接准备会自动继续；这不表示它已占用相机。",joined]
+            en:[NSString stringWithFormat:@"%@ is running. Quit it normally and preparation will continue automatically; its presence does not prove camera ownership.",joined]];
+    } else if([reason isEqual:@"no_device"]) [self publish:@"waiting_device" zh:@"等待 S1H USB 连接，请选择 PC(Tether)。" en:@"Waiting for S1H over USB. Select PC(Tether)."];
+    else if([reason isEqual:@"process_observation_unknown"] || [reason isEqual:@"inspection_error"])
+        [self publish:@"inspection_error" zh:@"暂时无法确认相机软件或连接状态；将继续只读检查，不会启动恢复。" en:@"Camera application or connection state is unknown. Read-only checks will continue without starting recovery."];
+    else [self publish:@"blocked" zh:@"安全检查尚未通过，请关闭其他相机软件并检查连接。" en:@"Safety checks are not ready. Close other camera applications and check the connection."];
 }
 - (void)republish { [self publish:self.state zh:self.messageZH en:self.messageEN]; }
 - (void)publishObservationFreshnessIfNeeded {
@@ -525,9 +614,15 @@ static NSString *GuardianLanguage(void) {
     });
 }
 - (void)repairWithInspection:(NSDictionary *)inspection serviceRetried:(BOOL)serviceRetried generation:(uint64_t)generation {
-    if (![self acceptGeneration:generation]) return;
+    if (![self acceptGeneration:generation]) {
+        if(generation==self.generation && self.desired && !self.stopping && !self.endingSession) self.pendingRecovery=YES;
+        return;
+    }
     NSString *reason=GuardianInspectionReadiness(inspection,NO);
-    if (reason) { [self publish:@"blocked" zh:@"请先关闭其他相机或导入软件，并检查 USB 连接。" en:@"Close other camera/import applications and check the USB connection first."]; return; }
+    if (reason) {
+        self.blockingCameraApps=GuardianBlockingCameraApps(inspection); self.pendingRecovery=self.desired;
+        [self publishRecoveryGate:reason]; return;
+    }
     NSString *registry=[inspection[@"interface_registry_id"] stringValue];
     [self publish:@"recovering" zh:@"正在准备 USB 连接，请暂时不要打开其他相机软件…" en:@"Preparing USB. Keep other camera applications closed for now…"];
     [self runHelper:@"s1h_iousbhost_probe" arguments:@[@"--io-buffer",@"--drain-input",@"--require-s1h",@"--expected-interface-id",registry]
@@ -542,9 +637,23 @@ static NSString *GuardianLanguage(void) {
         if(status==0) {
             [self runHelper:@"s1h_camera_service" arguments:@[@"--inspect"] kind:@"inspect" timeout:2 completion:^(int inspectStatus,NSDictionary *fresh,BOOL inspectExpired) {
                 if(![self acceptGeneration:generation] || inspectExpired) return;
-                if(inspectStatus || GuardianInspectionReadiness(fresh,NO) ||
+                NSString *gate=GuardianInspectionReadiness(fresh,NO);
+                if(!inspectStatus && ![gate isEqual:@"inspection_error"]) {
+                    self.inspection=fresh; self.inspectionObservationValid=YES; self.inspectionObservedAt=GuardianNow();
+                    self.blockingCameraApps=GuardianBlockingCameraApps(fresh);
+                } else { self.inspectionObservationValid=NO; self.blockingCameraApps=@[]; }
+                if(inspectStatus || gate ||
                     ![fresh[@"interface_registry_id"] isEqual:inspection[@"interface_registry_id"]]) {
-                    [self failRecovery:@"连接状态在准备后发生变化；未打开 Tether，将重新检查。" en:@"The connection changed after preparation. Tether was not opened; it will be checked again."]; return;
+                    if(!inspectStatus && [gate isEqual:@"camera_apps_running"]) {
+                        /* The USB check succeeded. Another application is
+                         * now present, so retain the requested handoff until
+                         * it exits; this is not an I/O retry failure. */
+                        self.pendingRecovery=self.desired; self.recoverAfter=GuardianNow()+1;
+                        [self publishRecoveryGate:gate]; return;
+                    }
+                    [self failRecovery:@"连接状态在准备后发生变化；未打开 Tether，将重新检查。" en:@"The connection changed after preparation. Tether was not opened; it will be checked again."];
+                    if(gate) [self publishRecoveryGate:gate];
+                    return;
                 }
                 self.inspection=fresh; self.inspectionObservationValid=YES; self.inspectionObservedAt=GuardianNow();
                 self.pendingRecovery=NO; self.retryCount=0; self.launchSource=self.recoverySource ?: @"unknown"; [self launchTether];
@@ -580,6 +689,7 @@ static NSString *GuardianLanguage(void) {
     if(self.stopping) return;
     if(status || expired || [GuardianInspectionReadiness(inspection,NO) isEqual:@"inspection_error"]) {
         self.inspectionObservationValid=NO;
+        self.blockingCameraApps=@[]; [self observeRecoveryGate:@"inspection_error"];
         if(!self.inspectionErrorLogged) [self recordEvent:@"inspection_error" fields:@{@"reason":expired ? @"deadline" : status ? @"helper_exit" : @"invalid_observation",@"exit_status":@(status),@"expired":@(expired)}];
         self.inspectionErrorLogged=YES;
         if(self.endingSession) { [self advanceEndSession]; return; }
@@ -589,6 +699,7 @@ static NSString *GuardianLanguage(void) {
     if(self.inspectionErrorLogged) [self recordEvent:@"inspection_recovered" fields:@{}];
     self.inspectionErrorLogged=NO;
     self.inspection=inspection; self.inspectionObservationValid=YES; self.inspectionObservedAt=GuardianNow();
+    self.blockingCameraApps=GuardianBlockingCameraApps(inspection);
     BOOL knownPresent=[inspection[@"device_model_state"] isEqual:@"confirmed"] && [inspection[@"s1h_device_count"] unsignedIntegerValue]==1 &&
         [inspection[@"s1h_interface_count"] unsignedIntegerValue]==1 && [inspection[@"interface_registry_id"] unsignedLongLongValue]>0;
     BOOL confirmedAbsent=[inspection[@"matching_usb_id_device_count"] isKindOfClass:NSNumber.class] &&
@@ -615,13 +726,15 @@ static NSString *GuardianLanguage(void) {
     if(self.sessionEnded) { [self publish:@"session_ended" zh:@"本次拍摄已结束；Tether 已退出，守护工具只观察状态。" en:@"This session has ended. Tether is closed; Guardian is observing only."]; return; }
     if(!self.desired) { [self publish:@"paused" zh:@"自动恢复已暂停；Tether 保持当前状态。" en:@"Automatic recovery is paused; Tether is left as it is."]; return; }
     if(self.quitRequested) { [self republish]; return; }
-    if(![self tetherAbsent]) { [self publish:@"tether_running" zh:@"Tether 正在运行；只观察 USB 状态，不访问相机。" en:@"Tether is running; observing USB state without opening the camera."]; return; }
+    BOOL absent=[self tetherAbsent];
+    if(!self.tetherObservationValid) { [self publishRecoveryGate:@"process_observation_unknown"]; return; }
+    if(!absent) { [self publish:@"tether_running" zh:@"Tether 正在运行；只观察 USB 状态，不访问相机。" en:@"Tether is running; observing USB state without opening the camera."]; return; }
     NSString *reason=GuardianInspectionReadiness(inspection,NO);
     if(reason) {
-        if([reason isEqual:@"no_device"]) [self publish:@"waiting_device" zh:@"等待 S1H USB 连接，请选择 PC(Tether)。" en:@"Waiting for S1H over USB. Select PC(Tether)."];
-        else [self publish:@"blocked" zh:@"安全检查尚未通过，请关闭其他相机软件并检查连接。" en:@"Safety checks are not ready. Close other camera applications and check the connection."];
+        [self publishRecoveryGate:reason];
         return;
     }
+    [self observeRecoveryGate:@"ready"];
     if(self.pendingRecovery && GuardianNow()>=self.recoverAfter && !self.task && !self.launching) {
         self.pendingRecovery=NO; [self repairWithInspection:inspection serviceRetried:NO generation:self.generation];
     } else if(!self.pendingRecovery && self.retryCount>=3) [self republish];
@@ -813,10 +926,20 @@ static NSString *GuardianLanguage(void) {
     dispatch_async(self.queue,^{ if(self.stopping) return;
         [self recordEvent:@"user_open_tether" fields:@{@"accepted":@(!self.endingSession && !self.task && !self.quitRequested && !self.launching)}];
         if(self.endingSession) { [self republish]; return; }
-        if(self.task || self.quitRequested) { [self publish:@"busy" zh:@"当前准备尚未完成，请稍后打开 Tether。" en:@"Preparation is still finishing. Open Tether afterward."]; return; }
+        if(self.task || self.quitRequested || self.launching) { [self publish:@"busy" zh:@"当前准备尚未完成，请稍后打开 Tether。" en:@"Preparation is still finishing. Open Tether afterward."]; return; }
+        BOOL absent=[self tetherAbsent];
+        if(self.tetherObservationValid && self.tetherRunning) {
+            [self recordEvent:@"launch_skipped" fields:@{@"source":@"afterOpenRecovery",@"reason":@"already_running",@"already_running":@YES}];
+            [self publish:@"tether_running" zh:@"Tether 正在运行；本次只检查状态，不重新启动或访问相机。" en:@"Tether is running. This action only observes status; it does not relaunch or open the camera."];
+            return;
+        }
         self.sessionEnded=NO; self.normalQuitDelivered=NO;
-        self.launchSource=@"directUserOpen";
-        [self launchTether];
+        self.recoverySource=@"afterOpenRecovery";
+        ++self.generation; self.desired=YES; self.pendingRecovery=YES; self.retryCount=0;
+        self.recoverAfter=GuardianNow()+1; self.nextInspect=0;
+        if(!absent) [self publishRecoveryGate:@"process_observation_unknown"];
+        else [self publish:@"starting" zh:@"正在检查连接；只有完成安全检查和 USB 准备后才会打开 Tether。" en:@"Checking the connection. Tether will open only after safety checks and USB preparation succeed."];
+        [self tick];
     });
 }
 - (void)stopTool { [self stopToolWithCompletion:^{}]; }

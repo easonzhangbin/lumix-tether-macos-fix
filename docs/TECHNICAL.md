@@ -298,3 +298,13 @@ Protocol recovery does not replace macOS privacy or accessory permissions. If pr
 Logs contain protocol headers, lengths, statuses and version information; ownership diagnostics also include process metadata. Review excerpts for private paths before sharing. Do not include image payloads, camera serial numbers or unredacted full crash reports. A crash report showing Tether 2.11 is an older-app report, not a verified failure of the tested 2.12 path.
 
 日志包含协议头、长度、状态和版本信息；占用诊断还包含进程元数据。分享前请检查并去除私人路径。不要提交图像内容、相机序列号或未脱敏的完整崩溃报告。显示 Tether 2.11 的崩溃报告属于旧版应用，不能直接证明已验证的 2.12 路径失败。
+
+## 0.2.2 recovery gate correction / 恢复前检查修正
+
+A later recurrence showed two successful normal Tether quits with no new repair helper while Preview was detected. The direct Open action could then launch Tether without preparation. The system camera service was the registered interface owner; Preview's running state was a conservative blocker, not proof that it owned USB. Normal Preview quit allowed queued recovery, service release and strict PTP validation, followed by actual official live view.
+
+Version 0.2.2 makes all Guardian launch entries use fresh preparation while Tether is absent, exposes fixed-name blockers separately from ownership, and logs blocked/unblocked states. Camera apps appearing during a successful repair preserve pending recovery instead of consuming the I/O retry budget. A hardware check of the new Open entry confirmed that it waited while Preview ran, then completed strict recovery after Preview quit normally and returned to official live view. Full hardware-free build validation passes 302 checks: 16 identity, 43 service, 50 event writer, 193 controller checks. This correction does not establish universal hot-plug or sleep/wake reliability.
+
+后续复发中，Tether两次正常退出后，在“预览”被检测为运行时没有执行新的恢复；直接打开入口随后绕过了准备。登记的接口占用者是系统相机服务，“预览”运行只是保守拦截，不能证明它占用了USB。正常退出“预览”后，排队的恢复完成服务释放及严格PTP检查，官方实时画面恢复。
+
+0.2.2 将 Tether 未运行时的启动入口统一到新的准备流程，分开显示客户端检查与接口占用者，并记录阻塞和解除。恢复成功后出现相机客户端时保留任务，不消耗 I/O 重试预算。新版打开入口的实机复测确认：“预览”运行时保持等待，正常退出后完成严格恢复并重新显示官方实时画面。完整无硬件验证共 302 项：身份 16、服务 43、事件 50、控制器 193；不能据此保证普遍拔插或睡眠唤醒可靠性。

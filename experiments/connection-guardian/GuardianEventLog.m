@@ -19,10 +19,10 @@ static NSDictionary *GuardianEventFields(NSDictionary *fields) {
     if(![fields isKindOfClass:NSDictionary.class]) return @{};
     NSSet *strings=[NSSet setWithArray:@[@"source",@"request_source",@"result",@"reason",@"state",@"previous_state",
         @"helper_kind",@"purpose",@"quit_purpose",@"phase",@"trigger",@"mode",@"app_version",@"attempt_id",
-        @"launch_attempt_id",@"helper_attempt_id",@"session_id",@"correlation_id",@"observation",@"verification",@"error_domain"]];
+        @"launch_attempt_id",@"helper_attempt_id",@"session_id",@"correlation_id",@"observation",@"verification",@"error_domain",@"blocking_app"]];
     NSSet *numbers=[NSSet setWithArray:@[@"pid",@"tether_pid",@"previous_pid",@"start_seconds",@"start_microseconds",
         @"exit_status",@"error_code",@"generation",@"retry_count",@"duration_ms",@"usb_link_speed_bps",@"device_count",
-        @"interface_count",@"expired",@"initial",@"verified",@"success",@"accepted",@"desired_running",@"ending_session",
+        @"interface_count",@"blocking_app_count",@"expired",@"initial",@"verified",@"success",@"accepted",@"desired_running",@"ending_session",
         @"session_ended",@"tether_running",@"stopping",@"busy",@"normal_quit_delivered",@"already_running",@"observed"]];
     NSMutableDictionary *safe=[NSMutableDictionary dictionary];
     for(id key in fields) {
@@ -44,7 +44,7 @@ static NSString *GuardianEventLabel(NSString *event) {
         @"inspection_recovered":@"连接检查已恢复",@"tether_observed":@"观察到 Tether 进程状态变化",
         @"process_observation_error":@"暂时无法确认 Tether 进程状态",@"process_observation_recovered":@"Tether 进程状态检查已恢复",
         @"helper_started":@"连接恢复步骤开始",@"helper_finished":@"连接恢复步骤结束",@"helper_error":@"连接恢复步骤出现错误",
-        @"recovery_failed":@"本次连接恢复未成功",
+        @"recovery_failed":@"本次连接恢复未成功",@"recovery_blocked":@"恢复前检查发现需要退出的程序或未确认状态",@"recovery_unblocked":@"恢复前检查拦截已解除",@"recovery_blocked_app":@"恢复前检查发现正在运行的相机客户端",
         @"normal_quit_queued":@"已准备正常退出 Tether 的请求",@"normal_quit_delivered":@"已向 Tether 发送正常退出请求",
         @"normal_quit_exited":@"正常退出目标进程已结束或变化",@"normal_quit_timeout":@"Tether 正常退出等待超时",
         @"normal_quit_target_changed":@"正常退出目标身份已变化",@"normal_quit_cancelled":@"正常退出请求在发送前已取消",

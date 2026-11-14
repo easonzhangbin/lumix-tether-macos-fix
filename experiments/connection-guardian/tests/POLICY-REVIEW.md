@@ -1,6 +1,6 @@
 # Connection guardian policy review
 
-`GuardianPolicyTests.m` passes **128 hardware-free assertions**: 61 against production pure policy functions and 37 around production End Session transitions with a fake environment. The latter execute the real asynchronous `endSession`/`pause` methods, repair/service completion closures, and state-only launch-result handoff. They cover eight End scenarios, including the duplicate-End generation race. Test controllers bypass the initializer that starts observation; they create no timer. Process lookups are trapped and must remain unused. No live process enumeration, USB access, app launch or signal occurs.
+`GuardianPolicyTests.m` passes **193 hardware-free assertions**: 61 against production pure policy functions and 37 around production End Session transitions with a fake environment. The latter execute the real asynchronous `endSession`/`pause` methods, repair/service completion closures, and state-only launch-result handoff. They cover eight End scenarios, including the duplicate-End generation race. Test controllers bypass the initializer that starts observation; they create no timer. Process lookups are trapped and must remain unused. No live process enumeration, USB access, app launch or signal occurs.
 
 The fake helper boundary stores and later calls the actual production completion closure; it does not launch an `NSTask` or test the real termination handler. Process presence, quit-target verification and normal-quit delivery are substituted environment methods. The launch-result fixture begins after the OS-facing callback has verified an identity. These checks do not validate real normal-quit delivery, successful Force Quit, LaunchServices timing, helper watchdogs or camera behavior. The broader asynchronous cases below remain an **unexecuted oracle** unless marked as fixture-tested in `policy-cases.json`. The separate official-Tether capture/control baseline is not a Guardian hardware validation.
 
@@ -72,3 +72,7 @@ clang -isysroot "$(xcrun --sdk macosx --show-sdk-path)" -arch arm64 -mmacosx-ver
 ```
 
 The test translation unit imports `GuardianController.m` to call production functions and transitions. Asynchronous public methods run on the fixture's serial queue; fake helper completions are injected deterministically. Freshness boundaries use explicit monotonic-clock values in the production pure function. No real system controller initializer is called. Passing these checks cannot establish hot-plug reliability, successful official capture after a restart, or that a manual launch can never overlap previously submitted USB work.
+
+## 0.2.2 regression coverage
+
+Current build passes 193 controller checks and 50 event-writer checks. Open cannot bypass fresh inspection, strict repair and the post-repair check. Preview blockers retain pending intent, deduplicate events, and do not consume I/O retry counts; three consecutive post-repair blocker arrivals are covered. Existing official Tether remains untouched.
