@@ -12,6 +12,10 @@ An independent Apple Silicon menu-bar utility that prepares the S1H USB connecti
 
 This is a community beta tested on one S1H setup. It is not affiliated with Panasonic or Apple. Official Tether must be installed separately; the download contains this project's own app and helpers only.
 
+## S1H Native Tether
+
+The standalone Apple Silicon app connects directly to the DC-S1H over USB for live view, remote shutter, exposure controls, and original-file transfer. [Download Native Tether 0.1.6](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.6) · [Setup and source](experiments/native-tether/README.md)
+
 ## High Resolution Diagnostic in 0.2.5
 
 With the S1H connected in Tether, choose **Start High Resolution Diagnostic…** from the Guardian menu and select Tether's import folder. When the diagnostic shows it is ready, take one XL shot. Guardian checks for a new structurally complete 12000×8000 DC-S1H RW2 in the folder or its immediate date subfolders.

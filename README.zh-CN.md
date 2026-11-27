@@ -12,6 +12,10 @@
 
 当前为在一套 S1H 环境验证的社区测试版，与松下或 Apple 无隶属关系。用户需另行安装官方 Tether；下载包只包含本项目应用及辅助程序。
 
+## S1H Native Tether 独立联机拍摄
+
+独立的 Apple Silicon 应用通过 USB 直连 DC-S1H，支持实时取景、软件快门、曝光控制和原片传输。[下载 Native Tether 0.1.6](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.6) · [使用说明与源码](experiments/native-tether/README.zh-CN.md)
+
 ## 0.2.5 摇摇乐诊断
 
 在 Tether 连好 S1H 后，从守护菜单选**开始摇摇乐诊断…**，选择 Tether 的导入文件夹。等诊断显示就绪，再拍一张 XL。守护工具检查该文件夹及其直接日期子目录中是否到达结构完整的 12000×8000 DC-S1H RW2。

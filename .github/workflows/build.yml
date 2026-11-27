@@ -27,5 +27,7 @@ jobs:
         run: ./experiments/connection-guardian/build.sh
       - name: Package Guardian beta and verify an independent extraction
         run: ./experiments/connection-guardian/package.sh
+      - name: Compile S1H Native Tether and run offline protocol checks
+        run: ./experiments/native-tether/build.sh
       - name: Package and verify an independent extraction
         run: ./scripts/package.sh
