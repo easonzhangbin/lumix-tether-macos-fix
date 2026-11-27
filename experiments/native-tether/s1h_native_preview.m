@@ -272,6 +272,7 @@ static void begin_watchdog(void) {
 @property(nonatomic) BOOL keepPreviewFormat;
 @property(nonatomic) BOOL inspectControls;
 @property(nonatomic) BOOL interactive;
+@property(nonatomic) BOOL noLiveView;
 @property(nonatomic) BOOL closeStaleSession;
 @property(nonatomic, strong) NSNumber *explicitStorageTarget;
 @property(nonatomic, copy) NSString *cameraSaveDirectory;
@@ -298,11 +299,13 @@ static void begin_watchdog(void) {
 @property(nonatomic, strong) NSDictionary *captureStorage;
 @property(nonatomic, strong) NSDictionary *cameraTransfer;
 @property(nonatomic) BOOL captureAvailable;
+@property(nonatomic) BOOL liveViewEnabled;
 @property(nonatomic) BOOL requiresReview;
 @property(nonatomic) BOOL staleSession;
 @property(nonatomic) double lastStatusWrite;
 @property(nonatomic) BOOL lastReportedCaptureAvailable;
 - (BOOL)update:(NSString *)state message:(NSString *)message;
+- (BOOL)publishConnectedStatus;
 - (BOOL)publish:(NSData *)jpeg width:(NSUInteger)width height:(NSUInteger)height;
 @end
 @implementation PreviewStatus
@@ -326,6 +329,7 @@ static void begin_watchdog(void) {
     status[@"requires_review"] = @(_requiresReview);
     status[@"stale_session"] = @(_staleSession);
     status[@"capture_available"] = @(captureAvailable);
+    status[@"live_view_enabled"] = @(_liveViewEnabled);
     NSError *error = nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:status options:NSJSONWritingPrettyPrinted error:&error];
     if (!data || ![data writeToURL:[_directory URLByAppendingPathComponent:@"status.json"]
@@ -336,6 +340,10 @@ static void begin_watchdog(void) {
     _lastStatusWrite = monotonic_seconds();
     _lastReportedCaptureAvailable = captureAvailable;
     return YES;
+}
+- (BOOL)publishConnectedStatus {
+    return [self update:@"previewing" message:_liveViewEnabled ?
+        @"Native USB preview is running." : @"Camera control is active. Live view is off."];
 }
 - (BOOL)publish:(NSData *)jpeg width:(NSUInteger)width height:(NSUInteger)height {
     NSError *error = nil;
@@ -353,7 +361,7 @@ static void begin_watchdog(void) {
     BOOL captureAvailable = _captureAvailable && !_requiresReview;
     if (_frames > 1 && !dimensionsChanged && captureAvailable == _lastReportedCaptureAvailable &&
         monotonic_seconds() - _lastStatusWrite < 0.25) return YES;
-    return [self update:@"previewing" message:@"Native USB preview is running."];
+    return [self publishConnectedStatus];
 }
 @end
 
@@ -1236,7 +1244,41 @@ static BOOL publish_action(PreviewStatus *status, NSString *actionID, NSDictiona
     NSMutableDictionary *actionStatus = [result mutableCopy];
     actionStatus[@"id"] = actionID;
     status.actionStatus = actionStatus;
-    return [status update:@"previewing" message:@"Native USB preview is running."];
+    return [status publishConnectedStatus];
+}
+
+static PreviewReply *request_live_view(NativePreviewTransport *transport, BOOL enabled) {
+    return [transport request:0x9412 parameters:@[enabled ? @0x0d000010 : @0x0d000011] dataExpected:NO];
+}
+
+static NSDictionary *change_live_view(PreviewStatus *status, NativePreviewTransport *transport, BOOL enabled) {
+    if (StopRequested || !transport.synchronized)
+        return @{@"status":@"rejected", @"message":@"The camera session is not available."};
+    NSString *message = enabled ? @"Live view is on." : @"Live view is off.";
+    if (status.liveViewEnabled == enabled) return @{@"status":@"ok", @"message":message};
+
+    PreviewReply *reply = request_live_view(transport, enabled);
+    if (!reply)
+        return @{@"status":transport.synchronized ? @"error" : @"outcome_unknown",
+                 @"message":transport.error ?: @"The camera did not confirm the live view request."};
+    if (reply.code != 0x2001)
+        return @{@"status":@"error",
+                 @"message":[NSString stringWithFormat:@"The camera declined the live view request (0x%04X).", reply.code]};
+    status.liveViewEnabled = enabled;
+    if (enabled) {
+        if (!StopRequested) bounded_pause(0.1);
+    } else if (status.directory) {
+        // Drop the paused frame so resuming cannot display it as newly live.
+        [NSFileManager.defaultManager removeItemAtURL:[status.directory URLByAppendingPathComponent:@"latest.jpg"]
+                                                error:NULL];
+        status.width = 0;
+        status.height = 0;
+    }
+    return @{@"status":@"ok", @"message":message};
+}
+
+static BOOL live_view_setting_is_boolean(id value) {
+    return [value isKindOfClass:NSNumber.class] && CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID();
 }
 
 static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus *status,
@@ -1259,6 +1301,7 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
     BOOL setPrefix = [kind isEqualToString:@"set_photo_name_prefix"];
     BOOL setBodyTarget = [kind isEqualToString:@"set_body_capture_target"];
     BOOL focus = [kind isEqualToString:@"focus_step"];
+    BOOL setLiveView = [kind isEqualToString:@"set_live_view"];
     NSNumber *bodyTarget = setBodyTarget && [target isKindOfClass:NSString.class] ?
         @{@"card":@0, @"mac":@1, @"card_and_mac":@2}[target] : nil;
     NSString *prefix = [action[@"prefix"] isKindOfClass:NSString.class] ? action[@"prefix"] : nil;
@@ -1267,7 +1310,8 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
         (set && (!property || !value || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID())) ||
         (setDirectory && !directory.isAbsolutePath) || (setPrefix && !s1h_photo_prefix_valid(prefix)) ||
         (setBodyTarget && !bodyTarget) || (focus && ![@[@"a", @"b"] containsObject:action[@"direction"] ?: NSNull.null]) ||
-        (!capture && !set && !refresh && !setDirectory && !setPrefix && !setBodyTarget && !focus)) {
+        (setLiveView && !live_view_setting_is_boolean(action[@"enabled"])) ||
+        (!capture && !set && !refresh && !setDirectory && !setPrefix && !setBodyTarget && !focus && !setLiveView)) {
         BOOL published = publish_action(status, actionID,
             @{@"status": @"rejected", @"message": @"The requested action, photo directory or name prefix is unavailable."});
         return published ? nil : status.writeError;
@@ -1298,8 +1342,8 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
             if (targetChange && !set_capture_target(transport, requestedTarget)) {
                 result = s1h_capture_result(@"rejected", @"Camera did not confirm the selected storage destination. No photo requested.", NO, @[]);
             } else {
-                /* Quiesce preview requests during still capture. Keep the
-                 * camera's live mode enabled for the shutter command. */
+                /* The shutter and downloads share the connection regardless
+                 * of live view. No JPEG requests can run during capture. */
                 result = s1h_capture_once(transport, directory, options.photoNamePrefix, ^(NSDictionary *update) {
                     if (!publish_action(status, actionID, update)) StopRequested = 1;
                 });
@@ -1318,6 +1362,8 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
             }
             result = withTarget;
         }
+    } else if (setLiveView) {
+        result = change_live_view(status, transport, [action[@"enabled"] boolValue]);
     } else if (focus) {
         result = s1h_focus_jog(transport, action[@"direction"]);
         if ([result[@"status"] isEqual:@"outcome_unknown"]) status.requiresReview = YES;
@@ -1353,6 +1399,8 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
         result = transport.synchronized ? @{@"status": @"ok", @"message": @"Camera settings refreshed."} :
             @{@"status": @"error", @"message": @"The camera settings could not be read completely."};
     }
+    if (!status.liveViewEnabled && transport.synchronized && !status.requiresReview && !StopRequested)
+        status.captureAvailable = YES;
     if (!publish_action(status, actionID, result)) return status.writeError;
     if (status.requiresReview) return @"Check the camera and saved files before reconnecting.";
     if (!transport.synchronized) return transport.error ?: @"The camera session lost its transaction boundary.";
@@ -1364,7 +1412,7 @@ static BOOL publish_camera_transfer(PreviewStatus *status, NSString *identifier,
     transfer[@"id"] = identifier;
     transfer[@"directory"] = directory;
     status.cameraTransfer = transfer;
-    return [status update:@"previewing" message:@"Native USB preview is running."];
+    return [status publishConnectedStatus];
 }
 
 static NSString *poll_camera_transfer(PreviewStatus *status, NativePreviewTransport *transport, PreviewOptions *options) {
@@ -1386,6 +1434,8 @@ static NSString *poll_camera_transfer(PreviewStatus *status, NativePreviewTransp
         if (!publish_camera_transfer(status, identifier, directory, update)) StopRequested = 1;
     });
     status.requiresReview = ![result[@"safe_to_resume"] boolValue];
+    if (!status.liveViewEnabled && transport.synchronized && !status.requiresReview && !StopRequested)
+        status.captureAvailable = YES;
     if (!publish_camera_transfer(status, identifier, directory, result)) return status.writeError;
     if (status.requiresReview) return @"Check the camera and saved files before reconnecting.";
     return transport.synchronized ? nil : transport.error ?: @"The camera session lost its transaction boundary.";
@@ -1397,6 +1447,7 @@ static int run_preview(PreviewOptions *options) {
         return 2;
     }
     if (options.inspectControls && (![options.previewFormat isEqualToString:@"auto"] || options.keepPreviewFormat)) return 2;
+    if (options.noLiveView && !options.interactive) return 2;
     if (options.interactive) {
         struct stat inputStatus;
         int flags = fcntl(STDIN_FILENO, F_GETFL);
@@ -1417,7 +1468,7 @@ static int run_preview(PreviewOptions *options) {
     NativePreviewTransport *transport = [NativePreviewTransport new]; transport.verbose = options.verbose;
     transport.controlReadEnabled = options.inspectControls || options.interactive;
     transport.interactiveEnabled = options.interactive;
-    BOOL sessionOpen = NO, vendorSessionOpen = NO, liveStarted = NO, clean = YES;
+    BOOL sessionOpen = NO, vendorSessionOpen = NO, connectionReady = NO, clean = YES;
     BOOL formatRequested = options.previewFormat && ![options.previewFormat isEqualToString:@"auto"];
     BOOL formatWriteAttempted = NO, previewStartAttempted = NO, keptFormatConfirmed = NO;
     NSDictionary *originalFormat = nil, *selectedFormat = nil;
@@ -1532,25 +1583,39 @@ static int run_preview(PreviewOptions *options) {
         }
     }
     if (!failure && !StopRequested && !options.inspectControls) {
-        previewStartAttempted = YES;
-        PreviewReply *reply = [transport request:0x9412 parameters:@[@0x0d000010] dataExpected:NO];
-        liveStarted = reply && reply.code == 0x2001;
-        if (!liveStarted) failure = transport.error ?: @"Camera did not enable preview mode.";
-        else { status.previewStart = monotonic_seconds(); bounded_pause(0.1); }
+        if (!options.noLiveView) {
+            previewStartAttempted = YES;
+            PreviewReply *reply = request_live_view(transport, YES);
+            status.liveViewEnabled = reply.code == 0x2001;
+            if (!status.liveViewEnabled) failure = transport.error ?: @"Camera did not enable preview mode.";
+        }
+        if (!failure) {
+            connectionReady = YES;
+            status.previewStart = monotonic_seconds();
+            if (status.liveViewEnabled) bounded_pause(0.1);
+            else {
+                status.captureAvailable = YES;
+                if (![status publishConnectedStatus]) failure = status.writeError;
+            }
+        }
     }
     NSMutableData *actionInput = options.interactive ? [NSMutableData data] : nil;
     NSMutableSet<NSUUID *> *completedActions = options.interactive ? [NSMutableSet set] : nil;
     BOOL actionInputEnded = NO;
-    while (!failure && liveStarted && !StopRequested && status.frames < options.frames &&
+    while (!failure && connectionReady && !StopRequested && status.frames < options.frames &&
            (options.duration <= 0 || monotonic_seconds() - status.previewStart < options.duration)) {
         @autoreleasepool {
             double frameStart = monotonic_seconds();
             if (options.interactive) failure = poll_camera_transfer(status, transport, options);
             if (failure || StopRequested) break;
-            if (options.interactive && status.frames) {
+            if (options.interactive && (status.frames || !status.liveViewEnabled)) {
                 NSDictionary *action = next_interactive_action(actionInput, &actionInputEnded, &failure);
                 if (action) failure = perform_interactive_action(action, status, transport, options, completedActions);
                 if (failure || StopRequested || (actionInputEnded && !action)) break;
+            }
+            if (!status.liveViewEnabled) {
+                bounded_pause(0.04);
+                continue;
             }
             PreviewReply *reply = nil;
             unsigned busy = 0;
@@ -1590,9 +1655,9 @@ static int run_preview(PreviewOptions *options) {
      * requests. Clean shutdown sends preview-stop and close only when the
      * complete previous response was consumed on a known protocol boundary. */
     if (sessionOpen && transport.synchronized && !status.requiresReview) {
-        if (liveStarted || (formatRequested && previewStartAttempted)) {
+        if (status.liveViewEnabled || (formatRequested && previewStartAttempted && !connectionReady)) {
             prepare_format_cleanup_transaction(transport);
-            PreviewReply *reply = [transport request:0x9412 parameters:@[@0x0d000011] dataExpected:NO];
+            PreviewReply *reply = request_live_view(transport, NO);
             if (reply.code != 0x2001) clean = NO;
         }
         if (vendorSessionOpen && transport.synchronized) {
@@ -1622,6 +1687,7 @@ static int run_preview(PreviewOptions *options) {
             status.formatMetadata[@"restore_status"] = @"unknown";
     }
     [transport closeInterface];
+    status.liveViewEnabled = NO;
     phase_deadline(4);
     if (!clean && !failure) failure = @"The native session could not be closed cleanly.";
     if (failure) {
@@ -1642,6 +1708,81 @@ static void append_ptp_string(NSMutableData *data, NSString *value) {
     unsigned char count = (unsigned char)(utf.length / 2 + 1); [data appendBytes:&count length:1];
     [data appendData:utf]; append16(data, 0);
 }
+
+@interface S1HLiveViewStatusFixture : PreviewStatus
+@property(nonatomic, copy) NSString *reportedState;
+@end
+@implementation S1HLiveViewStatusFixture
+- (BOOL)update:(NSString *)state message:(NSString *)message {
+    (void)message;
+    self.reportedState = state;
+    return YES;
+}
+@end
+
+@interface S1HLiveViewTransportFixture : S1HControlFixtureTransport
+@property(nonatomic) NSUInteger eventReads;
+@end
+@implementation S1HLiveViewTransportFixture
+- (NSDictionary *)readCaptureEvent:(NSTimeInterval)timeout error:(NSString **)error {
+    (void)timeout;
+    if (error) *error = nil;
+    ++_eventReads;
+    return nil;
+}
+@end
+
+static BOOL interactive_live_view_self_test(void) {
+    S1HLiveViewTransportFixture *transport = [S1HLiveViewTransportFixture new];
+    transport.synchronized = YES;
+    transport.fixtureRequests = [NSMutableArray array];
+    S1HLiveViewStatusFixture *status = [S1HLiveViewStatusFixture new];
+    status.liveViewEnabled = YES;
+    status.captureAvailable = YES;
+    PreviewOptions *options = [PreviewOptions new];
+    options.interactive = YES;
+    options.cameraSaveDirectory = @"/fixture-photos";
+    NSMutableSet *completed = [NSMutableSet set];
+    PreviewReply *accept = s1h_control_fixture_reply(0x2001, nil);
+    PreviewReply *decline = s1h_control_fixture_reply(0x2019, nil);
+    NSDictionary *turnOff = @{@"action":@"set_live_view", @"enabled":@NO, @"id":NSUUID.UUID.UUIDString};
+    NSDictionary *turnOn = @{@"action":@"set_live_view", @"enabled":@YES, @"id":NSUUID.UUID.UUIDString};
+    NSDictionary *malformed = @{@"action":@"set_live_view", @"enabled":@1, @"id":NSUUID.UUID.UUIDString};
+    NSArray *stopRequest = @[@0x9412, @[@0x0d000011], @NO, NSNull.null];
+    NSArray *startRequest = @[@0x9412, @[@0x0d000010], @NO, NSNull.null];
+    NSArray *readCaptureTarget = @[@0x940a, @[@0x08000090], @YES, NSNull.null];
+    BOOL ok = !perform_interactive_action(malformed, status, transport, options, completed) &&
+        [status.actionStatus[@"status"] isEqual:@"rejected"] && transport.fixtureRequests.count == 0;
+
+    transport.fixtureReplies = @[accept];
+    ok = ok && !perform_interactive_action(turnOff, status, transport, options, completed) &&
+        [status.actionStatus[@"status"] isEqual:@"ok"] && !status.liveViewEnabled && status.captureAvailable &&
+        [status.reportedState isEqual:@"previewing"] && [transport.fixtureRequests isEqual:@[stopRequest]] &&
+        !perform_interactive_action(turnOff, status, transport, options, completed) &&
+        transport.fixtureRequests.count == 1;
+    [transport.fixtureRequests removeAllObjects];
+
+    transport.fixtureReplies = @[decline];
+    NSDictionary *shutter = @{@"action":@"capture", @"target":@"mac", @"directory":@"/fixture-photos", @"id":NSUUID.UUID.UUIDString};
+    ok = ok && !poll_camera_transfer(status, transport, options) && transport.eventReads == 1 &&
+        !perform_interactive_action(shutter, status, transport, options, completed) &&
+        [status.actionStatus[@"status"] isEqual:@"rejected"] && !status.liveViewEnabled && status.captureAvailable &&
+        [transport.fixtureRequests isEqual:@[readCaptureTarget]];
+    [transport.fixtureRequests removeAllObjects];
+
+    transport.fixtureReplies = @[accept, decline, NSNull.null];
+    ok = ok && !perform_interactive_action(turnOn, status, transport, options, completed) &&
+        [status.actionStatus[@"status"] isEqual:@"ok"] && status.liveViewEnabled &&
+        [transport.fixtureRequests isEqual:@[startRequest]];
+    turnOff = @{@"action":@"set_live_view", @"enabled":@NO, @"id":NSUUID.UUID.UUIDString};
+    ok = ok && !perform_interactive_action(turnOff, status, transport, options, completed) &&
+        [status.actionStatus[@"status"] isEqual:@"error"] && status.liveViewEnabled;
+    turnOff = @{@"action":@"set_live_view", @"enabled":@NO, @"id":NSUUID.UUID.UUIDString};
+    return ok && perform_interactive_action(turnOff, status, transport, options, completed).length &&
+        [status.actionStatus[@"status"] isEqual:@"outcome_unknown"] && !transport.synchronized && status.liveViewEnabled &&
+        [transport.fixtureRequests isEqual:@[startRequest, stopRequest, stopRequest]];
+}
+
 static BOOL body_capture_target_self_test(void) {
     NSMutableData *physicalSlots = [NSMutableData data];
     append32(physicalSlots, 1); append32(physicalSlots, 0x00010000);
@@ -1769,6 +1910,7 @@ static int self_test(void) {
     CHECK(opcode_allowed(0x9412, @[@0x0d000010]) && opcode_allowed(0x9706, @[]), "Preview-only opcodes are allowed");
     CHECK(!opcode_allowed(0x9404, @[]) && !opcode_allowed(0x9403, @[]) && !opcode_allowed(0x940c, @[]), "Shutter, property writes, and recording opcodes are rejected");
     CHECK(!opcode_allowed(0x9412, @[@0x12345678]) && !opcode_allowed(0x1002, @[@2]), "Unexpected control/session parameters are rejected");
+    CHECK(interactive_live_view_self_test(), "Live view toggles preserve the connected shutter/event path and reject unconfirmed changes");
     CHECK(body_capture_target_self_test(), "Body shutter storage changes enforce card readiness, exactly one write and verified read-back");
     CHECK(battery_telemetry_self_test(), "Battery telemetry uses only advertised reads and confirmed 0-100 UINT8 data");
     NSDictionary *small = @{@"width": @640, @"height": @480, @"x_raw": @32, @"frequency_raw": @30};
@@ -1941,7 +2083,7 @@ static int self_test(void) {
 static void usage(const char *program) {
     printf("Usage: %s --output-dir PATH [--frames N] [--duration SECONDS] [--fps N] [--preview-format auto|max|INDEX] [--keep-preview-format] [--parent-pid PID] [--verbose]\n", program);
     printf("       %s --inspect-controls --output-dir PATH\n", program);
-    printf("       %s --interactive --output-dir PATH [--camera-save-dir ABSOLUTE_FOLDER] [--photo-name-prefix PREFIX] [preview options]\n", program);
+    printf("       %s --interactive --output-dir PATH [--no-live-view] [--camera-save-dir ABSOLUTE_FOLDER] [--photo-name-prefix PREFIX] [preview options]\n", program);
     printf("       %s --self-test | --help\n", program);
     printf("Default: 60 preview frames at up to 10 fps. Duration without --frames runs until that duration.\n");
     printf("Frame-rate range: 0.1 to 60 fps.\n");
@@ -1951,6 +2093,7 @@ static void usage(const char *program) {
     printf("--close-stale-session with --inspect-controls or --interactive explicitly closes a verified leftover session after SessionAlreadyOpen. Only use when the camera is idle.\n");
     printf("--set-capture-target sd|ram|both with --inspect-controls explicitly applies and verifies one camera storage destination.\n");
     printf("--photo-name-prefix numbers Mac copies from either shutter; empty preserves camera filenames.\n");
+    printf("--no-live-view starts an interactive session without live view and keeps the camera controls connected.\n");
     printf("Optional --parent-pid must match the launching process; its exit cancels this worker.\n");
     printf("Atomically updates latest.jpg and status.json. Only --interactive accepts explicit capture and control requests on stdin.\n");
     printf("Close Tether and other camera/import software before a hardware run. No driver seizure or process termination is attempted.\n");
@@ -1966,6 +2109,7 @@ int main(int argc, const char *argv[]) {
             if ([arg isEqual:@"--verbose"]) { options.verbose = YES; continue; }
             if ([arg isEqual:@"--inspect-controls"]) { options.inspectControls = YES; continue; }
             if ([arg isEqual:@"--interactive"]) { options.interactive = YES; continue; }
+            if ([arg isEqual:@"--no-live-view"]) { options.noLiveView = YES; continue; }
             if ([arg isEqual:@"--close-stale-session"]) { options.closeStaleSession = YES; continue; }
             if ([arg isEqual:@"--keep-preview-format"]) { options.keepPreviewFormat = YES; continue; }
             if (i + 1 >= argc) { usage(argv[0]); return 2; }
@@ -1999,6 +2143,7 @@ int main(int argc, const char *argv[]) {
             }
         }
         if (!options.output.length || !keep_preview_format_valid(options.keepPreviewFormat, options.previewFormat) ||
+            (options.noLiveView && !options.interactive) ||
             (options.closeStaleSession && !options.inspectControls && !options.interactive) ||
             (options.explicitStorageTarget && !options.inspectControls) ||
             (options.cameraSaveDirectory && (!options.interactive || !options.cameraSaveDirectory.isAbsolutePath)) ||

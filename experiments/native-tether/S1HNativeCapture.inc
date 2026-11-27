@@ -502,6 +502,23 @@ static BOOL s1h_capture_volatile_object_released(uint16_t response, BOOL extende
                               (extended && response == S1H_PTP_INVALID_PARAMETER));
 }
 
+static NSArray *s1h_capture_volatile_identity(NSNumber *handle, NSDictionary *info) {
+    return @[handle, info[@"name"], info[@"bytes"], info[@"object_format"], info[@"width"], info[@"height"]];
+}
+
+static NSDictionary *s1h_capture_read_reused_volatile_object(NativePreviewTransport *transport, NSNumber *handle,
+        NSSet<NSArray *> *savedObjects, double deadline, NSString **error) {
+    PreviewReply *reply = s1h_capture_read_when_ready(transport, 0x9110, @[handle], deadline, NO);
+    if (reply && s1h_capture_volatile_object_released(reply.code, YES, YES)) return nil;
+    NSDictionary *info = reply.code == S1H_PTP_OK ? s1h_capture_extended_object_info(reply.data) : nil;
+    if (!info || [info[@"association"] boolValue]) {
+        *error = transport.error ?: @"The repeated camera capture event did not return valid photo metadata.";
+        return nil;
+    }
+    if ([savedObjects containsObject:s1h_capture_volatile_identity(handle, info)]) return nil;
+    return info;
+}
+
 static BOOL s1h_capture_queue_handles(NSArray<NSNumber *> *handles, NSMutableSet<NSNumber *> *seen,
                                       NSMutableArray<NSNumber *> *pending, NSUInteger baselineCount) {
     for (NSNumber *handle in handles) {
@@ -519,9 +536,10 @@ static NSDictionary *s1h_capture_receive(NativePreviewTransport *transport, int 
     NSMutableArray *files = [NSMutableArray array];
     NSString *error = nil;
     BOOL hostShutter = firstEvent == nil;
-    /* Handles are deduplicated for one receive group. The S1H can allocate
-     * the same SDRAM handle to a later photograph. */
+    /* Deduplicate inventory handles and use fresh camera events plus
+     * object metadata when a verified SDRAM slot is reused. */
     NSMutableSet<NSNumber *> *seen = [NSMutableSet setWithArray:before ?: @[]];
+    NSMutableSet<NSArray *> *savedVolatileObjects = [NSMutableSet set];
     if (progress) progress(s1h_capture_busy(@"waiting", hostShutter ? @"Waiting for the camera to finish the capture." :
         @"Receiving a photograph taken on the camera."));
     double started = monotonic_seconds();
@@ -535,6 +553,7 @@ static NSDictionary *s1h_capture_receive(NativePreviewTransport *transport, int 
     NSUInteger eventDetailReads = 0;
     while (!StopRequested && monotonic_seconds() < deadline) {
         if (!files.count && !pending.count && monotonic_seconds() >= objectDeadline) break;
+        NSDictionary *reusedObjectInfo = nil;
         if (pending.count == 0) {
             NSDictionary *event = firstEvent ?: [transport readCaptureEvent:0.15 error:&error];
             firstEvent = nil;
@@ -558,12 +577,23 @@ static NSDictionary *s1h_capture_receive(NativePreviewTransport *transport, int 
             }
             NSNumber *handle = hostShutter || s1h_camera_event_starts_transfer(event) ?
                 s1h_capture_event_handle(event, captureTransaction, eventOnly) : nil;
+            BOOL volatileEvent = handle && [event[@"code"] unsignedIntValue] == 0xc109;
+            if (!hostShutter && eventOnly && volatileEvent && [handle isEqual:savedHandle] &&
+                [savedObjectInfo[@"extended_object"] boolValue] && [volatileHandles containsObject:handle]) {
+                reusedObjectInfo = s1h_capture_read_reused_volatile_object(transport, handle, savedVolatileObjects,
+                    MIN(deadline, monotonic_seconds() + 12.0), &error);
+                if (error || StopRequested) break;
+                if (reusedObjectInfo) {
+                    printf("Fresh camera event identified another photo at SDRAM handle 0x%08x (%llu bytes).\n",
+                        handle.unsignedIntValue, [reusedObjectInfo[@"bytes"] unsignedLongLongValue]);
+                    [pending addObject:handle];
+                }
+            }
             if (handle && !s1h_capture_queue_handles(@[handle], seen, pending, before.count)) {
                 error = @"Capture has too many new objects; only verified saved files are reported.";
                 break;
             }
-            if (handle && [event[@"code"] unsignedIntValue] == 0xc109)
-                [volatileHandles addObject:handle];
+            if (volatileEvent) [volatileHandles addObject:handle];
             double now = monotonic_seconds();
             if (pending.count == 0 && eventOnly && !event && savedHandle && now >= quietDeadline && now >= nextInventory) {
                 /* The event path has no pre-capture inventory. Confirm
@@ -579,8 +609,12 @@ static NSDictionary *s1h_capture_receive(NativePreviewTransport *transport, int 
                 }
                 NSDictionary *observed = check.code == S1H_PTP_OK ?
                     (extended ? s1h_capture_extended_object_info(check.data) : s1h_capture_object_info(check.data)) : nil;
-                complete = ([observed[@"name"] isEqual:savedObjectInfo[@"name"]] &&
-                            [observed[@"bytes"] isEqual:savedObjectInfo[@"bytes"]]) ||
+                BOOL sameObject = [observed[@"name"] isEqual:savedObjectInfo[@"name"]] &&
+                    [observed[@"bytes"] isEqual:savedObjectInfo[@"bytes"]];
+                if (sameObject && extended && !hostShutter && [volatileHandles containsObject:savedHandle])
+                    sameObject = [s1h_capture_volatile_identity(savedHandle, observed)
+                        isEqual:s1h_capture_volatile_identity(savedHandle, savedObjectInfo)];
+                complete = sameObject ||
                     (check && s1h_capture_volatile_object_released(check.code, extended,
                                                                   [volatileHandles containsObject:savedHandle]));
                 if (!complete) error = transport.error ?: @"Photo was saved, but the camera did not confirm the captured object's final state.";
@@ -607,26 +641,36 @@ static NSDictionary *s1h_capture_receive(NativePreviewTransport *transport, int 
         while (pending.count && !StopRequested) {
             NSNumber *handle = pending.firstObject;
             [pending removeObjectAtIndex:0];
-            double metadataDeadline = MIN(deadline, monotonic_seconds() + 12.0);
-            BOOL extended = [volatileHandles containsObject:handle];
-            PreviewReply *reply = s1h_capture_read_when_ready(transport, extended ? 0x9110 : 0x1008, @[handle], metadataDeadline, YES);
-            if (extended && (reply.code == S1H_PTP_UNSUPPORTED || reply.code == S1H_PTP_INVALID_PARAMETER)) {
-                extended = NO;
-                reply = s1h_capture_read_when_ready(transport, 0x1008, @[handle], metadataDeadline, YES);
+            NSDictionary *info = reusedObjectInfo;
+            reusedObjectInfo = nil;
+            if (!info) {
+                double metadataDeadline = MIN(deadline, monotonic_seconds() + 12.0);
+                BOOL extended = [volatileHandles containsObject:handle];
+                PreviewReply *reply = s1h_capture_read_when_ready(transport, extended ? 0x9110 : 0x1008, @[handle], metadataDeadline, YES);
+                if (extended && (reply.code == S1H_PTP_UNSUPPORTED || reply.code == S1H_PTP_INVALID_PARAMETER)) {
+                    extended = NO;
+                    reply = s1h_capture_read_when_ready(transport, 0x1008, @[handle], metadataDeadline, YES);
+                }
+                info = reply.code == S1H_PTP_OK ?
+                    (extended ? s1h_capture_extended_object_info(reply.data) : s1h_capture_object_info(reply.data)) : nil;
             }
-            NSDictionary *info = reply.code == S1H_PTP_OK ?
-                (extended ? s1h_capture_extended_object_info(reply.data) : s1h_capture_object_info(reply.data)) : nil;
             if (!info) {
                 error = transport.error ?: @"New captured object did not provide supported photo metadata before its deadline.";
                 break;
             }
             if (![info[@"association"] boolValue]) {
+                if (files.count >= S1H_CAPTURE_MAX_FILES) {
+                    error = @"Capture has too many new objects; only verified saved files are reported.";
+                    break;
+                }
                 NSDictionary *saved = s1h_capture_download(transport, handle.unsignedIntValue, info, directoryFD,
                                                           directory, naming, deadline, files.count + 1, progress, &error);
                 if (saved) [files addObject:saved];
                 if (!saved || error) break;
                 savedHandle = handle;
                 savedObjectInfo = info;
+                if (!hostShutter && [info[@"extended_object"] boolValue] && [volatileHandles containsObject:handle])
+                    [savedVolatileObjects addObject:s1h_capture_volatile_identity(handle, info)];
             }
             quietDeadline = monotonic_seconds() + 2.0;
         }
@@ -731,12 +775,21 @@ static NSDictionary *s1h_capture_from_camera_event(NativePreviewTransport *trans
 
 @interface S1HCaptureEventFixtureTransport : NativePreviewTransport
 @property(nonatomic, strong) NSMutableArray<NSArray *> *fixtureRequests;
+@property(nonatomic, copy) NSArray *fixtureReplies;
 @property(nonatomic) NSUInteger fixtureEventReads;
 @end
 
 @implementation S1HCaptureEventFixtureTransport
 - (PreviewReply *)request:(uint16_t)opcode parameters:(NSArray<NSNumber *> *)parameters dataExpected:(BOOL)expected {
+    NSUInteger index = self.fixtureRequests.count;
     [self.fixtureRequests addObject:@[@(opcode), parameters, @(expected)]];
+    if (self.fixtureReplies) {
+        id response = index < self.fixtureReplies.count ? self.fixtureReplies[index] : nil;
+        if ([response isKindOfClass:PreviewReply.class]) return response;
+        self.synchronized = NO;
+        self.error = @"Fixture camera response was lost.";
+        return nil;
+    }
     PreviewReply *reply = [PreviewReply new];
     reply.code = 0x2002;
     return reply;
@@ -748,6 +801,45 @@ static NSDictionary *s1h_capture_from_camera_event(NativePreviewTransport *trans
     return nil;
 }
 @end
+
+static BOOL s1h_capture_reused_object_self_test(NSData *original) {
+    NSNumber *handle = @0x12345678;
+    NSDictionary *old = s1h_capture_extended_object_info(original);
+    if (!old || [old[@"association"] boolValue]) return NO;
+    NSSet *saved = [NSSet setWithObject:s1h_capture_volatile_identity(handle, old)];
+    NSMutableData *different = [original mutableCopy];
+    write32((unsigned char *)different.mutableBytes + 12, [old[@"bytes"] unsignedIntValue] + 32);
+    S1HCaptureEventFixtureTransport *transport = [S1HCaptureEventFixtureTransport new];
+    transport.synchronized = YES;
+    transport.fixtureRequests = [NSMutableArray array];
+    PreviewReply *duplicate = s1h_control_fixture_reply(S1H_PTP_OK, original);
+    PreviewReply *next = s1h_control_fixture_reply(S1H_PTP_OK, different);
+    PreviewReply *busy = s1h_control_fixture_reply(S1H_PTP_DEVICE_BUSY, nil);
+    PreviewReply *expired = s1h_control_fixture_reply(S1H_PTP_INVALID_PARAMETER, nil);
+    NSArray *read = @[@0x9110, @[handle], @YES];
+    transport.fixtureReplies = @[duplicate];
+    NSString *error = nil;
+    BOOL ok = !s1h_capture_read_reused_volatile_object(transport, handle, saved, monotonic_seconds() + 1.0, &error) &&
+        !error && [transport.fixtureRequests isEqual:@[read]];
+    [transport.fixtureRequests removeAllObjects];
+    transport.fixtureReplies = @[busy, next];
+    NSDictionary *observed = s1h_capture_read_reused_volatile_object(transport, handle, saved, monotonic_seconds() + 1.0, &error);
+    ok = ok && [observed[@"name"] isEqual:old[@"name"]] && ![observed[@"bytes"] isEqual:old[@"bytes"]] &&
+        !error && [transport.fixtureRequests isEqual:@[read, read]];
+    [transport.fixtureRequests removeAllObjects];
+    transport.fixtureReplies = @[expired];
+    ok = ok && !s1h_capture_read_reused_volatile_object(transport, handle, saved, monotonic_seconds() + 1.0, &error) &&
+        !error && transport.synchronized && [transport.fixtureRequests isEqual:@[read]];
+    [transport.fixtureRequests removeAllObjects];
+    transport.fixtureReplies = @[s1h_control_fixture_reply(S1H_PTP_OK, [different subdataWithRange:NSMakeRange(0, 40)])];
+    ok = ok && !s1h_capture_read_reused_volatile_object(transport, handle, saved, monotonic_seconds() + 1.0, &error) &&
+        error.length && transport.synchronized && [transport.fixtureRequests isEqual:@[read]];
+    [transport.fixtureRequests removeAllObjects];
+    transport.fixtureReplies = @[NSNull.null];
+    error = nil;
+    return ok && !s1h_capture_read_reused_volatile_object(transport, handle, saved, monotonic_seconds() + 1.0, &error) &&
+        error.length && !transport.synchronized && [transport.fixtureRequests isEqual:@[read]];
+}
 
 /* Pure packet/path checks: no device, filesystem creation, or shutter. */
 static BOOL s1h_capture_self_test(void) {
@@ -803,6 +895,8 @@ static BOOL s1h_capture_self_test(void) {
     CAPTURE_CHECK([extendedInfo[@"bytes"] unsignedLongLongValue] == 162000000 &&
         [extendedInfo[@"width"] unsignedIntValue] == 12000 && [extendedInfo[@"height"] unsignedIntValue] == 8000 &&
         [extendedInfo[@"name"] isEqual:filename], "Extended metadata keeps the 64-bit length and XL dimensions");
+    CAPTURE_CHECK(s1h_capture_reused_object_self_test(extended),
+        "A fresh reused SDRAM object is re-probed safely without treating duplicates or expiry as a file");
     write32((unsigned char *)extended.mutableBytes + 16, 1);
     CAPTURE_CHECK(!s1h_capture_extended_object_info(extended), "Extended oversized object cannot bypass the download bound");
     bytes = info.mutableBytes; write32(bytes + 8, UINT32_MAX);

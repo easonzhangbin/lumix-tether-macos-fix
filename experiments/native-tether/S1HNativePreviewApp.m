@@ -5,6 +5,7 @@
 #import <ImageIO/ImageIO.h>
 #import <QuartzCore/QuartzCore.h>
 #import "S1HBorderBeam.h"
+#import "S1HCapturedPhotoPreview.h"
 #import "S1HControlPanel.h"
 #import "S1HInterfaceStyle.h"
 #import "S1HPhotoNaming.h"
@@ -148,6 +149,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
 @property(nonatomic,strong) S1HBorderBeam *startButtonBeam;
 @property(nonatomic,strong) NSButton *stopButton;
 @property(nonatomic,strong) NSButton *reconnectBox;
+@property(nonatomic,strong) NSButton *liveViewBox;
 @property(nonatomic,strong) NSPopUpButton *qualityPopup;
 @property(nonatomic,strong) S1HControlPanel *controlPanel;
 @property(nonatomic,strong) NSPipe *commandPipe;
@@ -158,6 +160,13 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
 @property(nonatomic,copy) NSString *cameraTransferID;
 @property(nonatomic,copy) NSString *cameraTransferStatus;
 @property(nonatomic,strong) NSURL *lastSavedPhotoURL;
+@property(nonatomic,strong) NSURL *reviewedPhotoURL;
+@property(nonatomic,strong) NSURL *reviewImageURL;
+@property(nonatomic,strong) id reviewImage;
+@property(nonatomic,strong) dispatch_queue_t photoPreviewQueue;
+@property(nonatomic) BOOL photoPreviewPending;
+@property(nonatomic) BOOL liveViewEnabled;
+@property(nonatomic) NSUInteger previewPresentationGeneration;
 @property(nonatomic,strong) NSDictionary *currentControls;
 @property(nonatomic,strong) NSNumber *cameraBatteryPercent;
 @property(nonatomic,copy) NSString *cameraUSBLink;
@@ -239,6 +248,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
 }
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (item.action == @selector(checkCameraService:)) return [self canCheckCameraService];
+    if (item.action == @selector(previewGridChanged:)) return self.liveViewEnabled;
     return YES;
 }
 - (NSString *)cameraServiceFailure:(NSDictionary *)snapshot reason:(id)reason {
@@ -456,6 +466,8 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     self.chinese = [NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"];
+    [NSUserDefaults.standardUserDefaults registerDefaults:@{@"liveViewEnabled": @YES}];
+    self.liveViewEnabled = [NSUserDefaults.standardUserDefaults boolForKey:@"liveViewEnabled"];
     NSURL *cache = [NSFileManager.defaultManager URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject;
     self.baseOutputURL = [cache URLByAppendingPathComponent:@"S1H Native Preview/experimental" isDirectory:YES];
     [NSFileManager.defaultManager createDirectoryAtURL:self.baseOutputURL withIntermediateDirectories:YES attributes:nil error:NULL];
@@ -483,9 +495,8 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     CGFloat height = NSHeight(view.bounds);
     self.previewView = [[S1HPreviewView alloc] initWithFrame:NSMakeRect(16, 72, 780, height - 142)];
     self.previewView.pixelZoom = [NSUserDefaults.standardUserDefaults integerForKey:@"previewPixelZoom"];
-    self.previewView.showsGrid = [NSUserDefaults.standardUserDefaults boolForKey:@"previewGrid"];
+    self.previewView.showsGrid = self.liveViewEnabled && [NSUserDefaults.standardUserDefaults boolForKey:@"previewGrid"];
     self.previewView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    [self.previewView setAccessibilityLabel:[self text:@"相机实时取景" english:@"Camera live view"]];
     [view addSubview:self.previewView];
 
     NSView *toolbar = [NSView new];
@@ -506,10 +517,17 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     S1HStyleButton(self.stopButton);
     [toolbar addSubview:self.stopButton];
     self.reconnectBox = [NSButton checkboxWithTitle:[self text:@"断线后重试" english:@"Retry after disconnect"] target:self action:@selector(reconnectChanged:)];
-    self.reconnectBox.frame = NSMakeRect(224, 9, 216, 30);
+    self.reconnectBox.frame = NSMakeRect(224, 9, 180, 30);
     self.reconnectBox.state = NSControlStateValueOn;
     [toolbar addSubview:self.reconnectBox];
-    self.qualityPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(452, 9, 214, 30) pullsDown:NO];
+    self.liveViewBox = [NSButton checkboxWithTitle:[self text:@"实时取景" english:@"Live View"] target:self action:@selector(liveViewChanged:)];
+    self.liveViewBox.frame = NSMakeRect(410, 9, 98, 30);
+    self.liveViewBox.state = self.liveViewEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    self.liveViewBox.toolTip = [self text:@"关闭实时取景后，显示最近传到 Mac 的照片。" english:@"Turn off live view to review the last photo transferred to the Mac."];
+    [toolbar addSubview:self.liveViewBox];
+    [self updatePreviewAccessibility];
+    self.qualityPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(513, 9, 153, 30) pullsDown:NO];
+    self.qualityPopup.toolTip = [self text:@"实时取景分辨率" english:@"Live view resolution"];
     [self.qualityPopup addItemsWithTitles:@[[self text:@"保持相机当前分辨率" english:@"Keep camera setting"], [self text:@"标准预览分辨率" english:@"Standard resolution"], [self text:@"最高预览分辨率" english:@"Highest resolution"]]];
     NSString *savedFormat = [NSUserDefaults.standardUserDefaults stringForKey:@"previewFormat"];
     NSInteger formatIndex = 2;
@@ -563,6 +581,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     if (@available(macOS 14.0, *)) [NSApp activate];
     else [NSApp activateIgnoringOtherApps:YES];
     self.previewQueue = dispatch_queue_create("s1h.preview.decode", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
+    self.photoPreviewQueue = dispatch_queue_create("s1h.photo-preview.decode", dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0));
     self.timer = [NSTimer timerWithTimeInterval:0.125 target:self selector:@selector(refresh:) userInfo:nil repeats:YES];
     self.previewTimer = [NSTimer timerWithTimeInterval:1.0 / 60.0 target:self selector:@selector(refreshPreview:) userInfo:nil repeats:YES];
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
@@ -666,7 +685,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     [self.controlPanel setCameraReady:NO];
     [self.controlPanel setCaptureAvailable:NO];
     [self.controlPanel updateCapabilities:@{} busy:NO];
-    [self.previewView displayFrame:NULL];
+    if (self.liveViewEnabled) [self.previewView displayFrame:NULL];
     self.lastFrameIdentity = (PreviewFrameIdentity){0};
     self.viewWidth = 0;
     self.viewHeight = 0;
@@ -679,6 +698,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     [self pruneOldRuns];
     [self setConnectButtonEnabled:NO];
     self.stopButton.enabled = YES;
+    self.liveViewBox.enabled = NO;
     self.qualityPopup.enabled = NO;
     NSURL *logURL = [self.outputURL URLByAppendingPathComponent:@"worker.log"];
     [NSFileManager.defaultManager createFileAtPath:logURL.path contents:nil attributes:nil];
@@ -689,6 +709,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     NSMutableArray *arguments = [@[@"--output-dir", self.outputURL.path, @"--frames", @"1000000000", @"--fps", @"30",
         @"--parent-pid", [NSString stringWithFormat:@"%d", NSProcessInfo.processInfo.processIdentifier], @"--interactive"] mutableCopy];
     if (closeStaleSession) [arguments addObject:@"--close-stale-session"];
+    if (!self.liveViewEnabled) [arguments addObject:@"--no-live-view"];
     if (self.photoNamePrefix.length) [arguments addObjectsFromArray:@[@"--photo-name-prefix", self.photoNamePrefix]];
     NSURL *directory = [self photoDirectory:self.saveDirectory];
     self.cameraSaveDirectory = nil;
@@ -737,6 +758,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
         self.workerPipe.fileHandleForReading.readabilityHandler = nil;
         [self setConnectButtonEnabled:YES];
         self.stopButton.enabled = NO;
+        self.liveViewBox.enabled = YES;
         self.qualityPopup.enabled = YES;
         self.desiredRunning = NO;
     }
@@ -775,6 +797,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     [self.controlPanel updateCapabilities:self.currentControls ?: @{} busy:NO];
     [self setConnectButtonEnabled:YES];
     self.stopButton.enabled = NO;
+    self.liveViewBox.enabled = !self.terminating;
     self.qualityPopup.enabled = YES;
     if (self.terminating) { [NSApp replyToApplicationShouldTerminate:YES]; return; }
     if (self.requiresReview) {
@@ -833,6 +856,72 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     NSString *format = self.qualityPopup.indexOfSelectedItem == 2 ? @"max" : (self.qualityPopup.indexOfSelectedItem == 1 ? @"0" : @"auto");
     [NSUserDefaults.standardUserDefaults setObject:format forKey:@"previewFormat"];
 }
+- (void)updatePreviewAccessibility {
+    [self.previewView setAccessibilityLabel:self.liveViewEnabled
+        ? [self text:@"相机实时取景" english:@"Camera live view"]
+        : [self text:@"最近拍摄照片" english:@"Last captured photo"]];
+}
+- (void)showLiveView:(BOOL)enabled {
+    self.liveViewBox.state = enabled ? NSControlStateValueOn : NSControlStateValueOff;
+    if (self.liveViewEnabled == enabled) return;
+    self.liveViewEnabled = enabled;
+    self.previewPresentationGeneration += 1;
+    self.viewWidth = self.viewHeight = 0;
+    self.updatesSinceSample = 0;
+    self.frameSampleTime = 0;
+    self.updatesPerSecond = -1;
+    self.previewView.showsGrid = enabled && [NSUserDefaults.standardUserDefaults boolForKey:@"previewGrid"];
+    [self updatePreviewAccessibility];
+    [self.previewView displayFrame:enabled ? NULL : (__bridge CGImageRef)self.reviewImage];
+    if (!enabled) {
+        [self loadPhotoPreview];
+        if (!self.worker && !self.desiredRunning) [self refreshPhotoReviewMetrics];
+    } else if (!self.worker && !self.desiredRunning) {
+        self.metricsLabel.stringValue = @"—";
+    }
+}
+- (void)liveViewChanged:(NSButton *)sender {
+    BOOL enabled = sender.state == NSControlStateValueOn;
+    if (!self.worker && !self.terminating) {
+        [self showLiveView:enabled];
+        [NSUserDefaults.standardUserDefaults setBool:enabled forKey:@"liveViewEnabled"];
+        return;
+    }
+    sender.state = self.liveViewEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    if ([self sendAction:@{@"action": @"set_live_view", @"enabled": @(enabled)}]) sender.enabled = NO;
+}
+- (void)loadPhotoPreview {
+    NSURL *photoURL = self.lastSavedPhotoURL;
+    if (self.liveViewEnabled || self.photoPreviewPending || !photoURL || [photoURL isEqual:self.reviewedPhotoURL]) return;
+    self.photoPreviewPending = YES;
+    dispatch_async(self.photoPreviewQueue, ^{
+        @autoreleasepool {
+            id image = CFBridgingRelease(S1HCopyCapturedPhotoPreview(photoURL));
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.photoPreviewPending = NO;
+                if ([photoURL isEqual:self.lastSavedPhotoURL]) {
+                    self.reviewedPhotoURL = photoURL;
+                    if (image) {
+                        self.reviewImage = image;
+                        self.reviewImageURL = photoURL;
+                        if (!self.liveViewEnabled) [self.previewView displayFrame:(__bridge CGImageRef)image];
+                    }
+                }
+                [self loadPhotoPreview];
+            });
+        }
+    });
+}
+- (void)refreshPhotoReviewMetrics {
+    NSString *message = nil;
+    if (self.photoPreviewPending)
+        message = [self text:@"正在准备照片预览…" english:@"Preparing photo preview…"];
+    else if ([self.lastSavedPhotoURL isEqual:self.reviewedPhotoURL] && ![self.reviewImageURL isEqual:self.lastSavedPhotoURL])
+        message = [self text:@"照片已保存，无法生成预览" english:@"Photo saved. Preview unavailable."];
+    else
+        message = self.reviewImageURL.lastPathComponent ?: [self text:@"传到 Mac 的照片会显示在这里" english:@"Photos transferred to the Mac appear here"];
+    self.metricsLabel.stringValue = self.cameraUSBLink ? [NSString stringWithFormat:@"%@    %@", message, self.cameraUSBLink] : message;
+}
 - (void)stop:(id)sender {
     (void)sender;
     if (self.worker && self.workerStopRequested) return;
@@ -854,6 +943,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     if (!task) {
         [self setConnectButtonEnabled:YES];
         self.stopButton.enabled = NO;
+        self.liveViewBox.enabled = YES;
         self.metricsLabel.stringValue = @"—";
         self.metricsLabel.toolTip = nil;
         self.metricsLabel.textColor = NSColor.secondaryLabelColor;
@@ -1039,7 +1129,10 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
         self.lastSavedPhotoURL = [NSURL fileURLWithPath:path];
         count++;
     }
-    if (count) [self.controlPanel setLastSavedPath:self.lastSavedPhotoURL.path];
+    if (count) {
+        [self.controlPanel setLastSavedPath:self.lastSavedPhotoURL.path];
+        [self loadPhotoPreview];
+    }
     return count;
 }
 - (BOOL)cameraTransferInProgress {
@@ -1131,6 +1224,16 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     self.pendingAction = nil;
     BOOL captured = [pending[@"action"] isEqual:@"capture"];
     BOOL ok = [result isEqualToString:@"ok"];
+    if ([pending[@"action"] isEqual:@"set_live_view"]) {
+        if (ok && [pending[@"enabled"] boolValue] == self.liveViewEnabled) {
+            [NSUserDefaults.standardUserDefaults setBool:self.liveViewEnabled forKey:@"liveViewEnabled"];
+            [self.controlPanel setResultMessage:nil];
+        } else {
+            [self.controlPanel setWarningMessage:[self text:@"相机未确认实时取景切换。请在相机空闲时重试。"
+                english:@"The camera did not confirm the live view change. Retry when it is idle."]];
+        }
+        return;
+    }
     if ([pending[@"action"] isEqual:@"focus_step"]) {
         if (ok) [self.controlPanel setResultMessage:[self text:@"相机已确认本次调焦命令。" english:@"The camera accepted the focus adjustment."]];
         else if ([result isEqual:@"rejected"])
@@ -1260,14 +1363,17 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
         self.startButton.title = [self text:@"连接" english:@"Connect"];
     }
     NSDictionary *action = [status[@"action_status"] isKindOfClass:NSDictionary.class] ? status[@"action_status"] : nil;
+    id liveViewState = status[@"live_view_enabled"];
+    if ([state isEqualToString:@"previewing"] && self.desiredRunning && [liveViewState isKindOfClass:NSNumber.class])
+        [self showLiveView:[liveViewState boolValue]];
     NSString *previousDirectory = self.cameraSaveDirectory;
     if (action) [self showActionStatus:action];
     NSDictionary *transfer = [status[@"camera_transfer"] isKindOfClass:NSDictionary.class] ? status[@"camera_transfer"] : nil;
     if (transfer) [self showCameraTransferStatus:transfer previousDirectory:previousDirectory];
     [self updateCaptureProgressForAction:action transfer:transfer];
     self.cameraReady = self.desiredRunning && !self.requiresReview && [state isEqualToString:@"previewing"];
-    if (self.cameraReady && [status[@"frames"] isKindOfClass:NSNumber.class] &&
-        [status[@"frames"] unsignedIntegerValue] > 0) {
+    if (self.cameraReady && (!self.liveViewEnabled || ([status[@"frames"] isKindOfClass:NSNumber.class] &&
+        [status[@"frames"] unsignedIntegerValue] > 0))) {
         self.reconnectDelay = 0;
         self.automaticReleaseAttempted = NO;
     }
@@ -1275,6 +1381,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     [self.controlPanel setCameraReady:self.cameraReady];
     [self.controlPanel setCaptureAvailable:self.cameraReady && self.captureAvailable];
     BOOL busy = self.pendingAction != nil || [action[@"status"] isEqual:@"busy"] || [self cameraTransferInProgress];
+    self.liveViewBox.enabled = self.cameraReady && !busy;
     if (controlsChanged) [self.controlPanel updateCapabilities:controls busy:busy];
     else [self.controlPanel setBusy:busy];
     if (self.requiresReview) {
@@ -1287,7 +1394,15 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     }
     else if (blockedByStaleSession) [self showStaleSessionRecoveryRequired];
     else if ([state isEqualToString:@"previewing"] && self.desiredRunning) {
-        if ([self cameraTransferInProgress]) {
+        if ([self.pendingAction[@"action"] isEqual:@"set_live_view"]) {
+            self.stateLabel.stringValue = [self text:@"正在切换实时取景…" english:@"Switching live view…"];
+        } else if (!self.liveViewEnabled) {
+            if ([self cameraTransferInProgress] || [self.pendingAction[@"action"] isEqual:@"capture"])
+                self.stateLabel.stringValue = [self text:@"正在接收照片 · 实时取景已关闭" english:@"Receiving photo · Live view off"];
+            else
+                self.stateLabel.stringValue = [self text:@"照片回看 · 实时取景已关闭" english:@"Photo review · Live view off"];
+            [self refreshPhotoReviewMetrics];
+        } else if ([self cameraTransferInProgress]) {
             self.stateLabel.stringValue = [self text:@"正在接收机身拍摄原片，已暂停取景更新" english:@"Receiving camera photos. Live view updates paused."];
             self.metricsLabel.stringValue = [self text:@"显示拍摄前的最后一帧" english:@"Showing the last frame before capture"];
         } else if ([self.pendingAction[@"action"] isEqual:@"capture"]) {
@@ -1334,7 +1449,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     self.metricsLabel.stringValue = metrics;
 }
 - (BOOL)canRefreshPreview {
-    return self.worker && self.desiredRunning && self.window.visible && !self.window.miniaturized &&
+    return self.liveViewEnabled && self.worker && self.desiredRunning && self.window.visible && !self.window.miniaturized &&
         ![self.pendingAction[@"action"] isEqual:@"capture"] && ![self cameraTransferInProgress];
 }
 - (void)refreshPreview:(NSTimer *)timer {
@@ -1344,6 +1459,7 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
     NSURL *frameURL = [runURL URLByAppendingPathComponent:@"latest.jpg"];
     PreviewFrameIdentity previous = self.lastFrameIdentity;
     NSUInteger generation = self.generation;
+    NSUInteger presentation = self.previewPresentationGeneration;
     self.framePending = YES;
     dispatch_async(self.previewQueue, ^{
         @autoreleasepool {
@@ -1352,7 +1468,8 @@ static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.framePending = NO;
                 if (!frame) return;
-                if ([self canRefreshPreview] && self.generation == generation && [self.outputURL isEqual:runURL]) {
+                if ([self canRefreshPreview] && self.generation == generation &&
+                    self.previewPresentationGeneration == presentation && [self.outputURL isEqual:runURL]) {
                     [self.previewView displayFrame:frame];
                     self.lastFrameIdentity = identity;
                     self.viewWidth = CGImageGetWidth(frame);

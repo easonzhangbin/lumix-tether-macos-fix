@@ -4,16 +4,20 @@
 
 面向 Apple 芯片 Mac 的松下 **DC-S1H** USB 联机拍摄工具。我们遇到的问题是 DC-S1H 在较新的 macOS 测试环境里难以连上原厂 LUMIX Tether。为继续使用这台相机做棚拍，我们用原生 AppKit 界面和 USB／PTP 通信进程，将取景、遥控快门、原片传输和保存目录放进同一个应用。 [松下公布的兼容信息与下载](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)
 
-[下载 0.1.16（Apple 芯片 PKG）](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.16/S1H-Native-Tether-0.1.16-arm64.pkg) · [发布说明与 SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.16)
+[下载 0.1.17（Apple 芯片 PKG）](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.17/S1H-Native-Tether-0.1.17-arm64.pkg) · [发布说明与 SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.17)
 
 ## 安装与拍摄
 
-1. 用发布页对应的 `.pkg.sha256` 核对 PKG，再双击完成安装。PKG 安装包未签名，应用使用 ad-hoc 签名，发布包尚未经过 Apple 公证。如果 macOS 阻止打开，先确认来源并核对校验值，再决定是否打开。 [Apple 安全打开应用说明](https://support.apple.com/zh-cn/102445)
+1. 用发布页对应的 `.pkg.sha256` 核对 PKG，再双击完成安装。PKG 安装包未签名，应用使用 ad-hoc 签名，发布包尚未经过 Apple 公证，数据面板使用系统字体。如果 macOS 阻止打开，先确认来源并核对校验值，再决定是否打开。 [Apple 安全打开应用说明](https://support.apple.com/zh-cn/102445)
 2. 退出 LUMIX Tether、图像捕捉、「预览」等可能占用相机的应用。使用 USB 数据线接入 S1H，在机身选择 **PC(Tether)**。从「应用程序」打开 **S1H Native Tether.app**，应用会尝试连接。点击**停止**后，可用**连接**发起新的尝试。
 3. 选择照片保存文件夹，或使用默认的 `~/Pictures/S1H Tether`。点击**拍摄并保存**时默认**仅保存到 Mac**。按机身快门时，沿用相机当前的联机存储目标。
 4. 等待照片传输完成，再点击**停止**，然后断开 USB 或切换到其他相机应用。
 
-## 0.1.16 的主要功能
+## 0.1.17 的主要功能
+
+工具栏的**实时取景**可在相机画面与照片回看之间切换。关闭后，相机停止传送取景画面，USB 联机继续保持，可以拍摄和传输原片。预览区显示应用最近收到的 JPEG 或 RW2，传输下一张时保留上一张。使用机身快门回看照片时，请选择会将原片传到 Mac 的联机存储目标。实时取景默认开启，重新打开应用时会沿用上次设置。若启动时关闭了实时取景，拍摄并传回第一张照片后即可回看。
+
+0.1.17 也修复了快速连续按下机身快门时可能漏传一张 RAW 的问题。相机会重复使用临时图像槽位，应用现在会核对文件信息来区分新照片和重复通知。
 
 - **实时取景与相机参数**包括适合窗口、100% 实际像素、可拖动的 200% 放大和构图九宫格。光圈、快门、ISO 和白平衡的可选项以相机报告为准。
 - **远程对焦**提供「向前对焦」和「向后对焦」，每次点击移动一步。将机身设为 MF，并使用支持电子调焦的镜头。若按钮不可用，切换 MF 后刷新相机参数。
@@ -25,7 +29,7 @@
 
 ## 实机验证与适用范围
 
-构建目标为 **Apple 芯片上的 macOS 12 或更高版本**。实机用的是 **DC-S1H 和搭载 Apple M1 Max 的 Mac**，系统为 **macOS 27.0.1（26A434）**。已验证 **1600 × 1072** 实时取景、镜头双向 MF 调整，以及同一会话连续两张 **12000 × 8000 RW2** 的保存与完整解码。更多机型、系统版本和长时间拍摄尚待验证。「存储卡＋Mac」需要机身识别存储卡，也有待进一步实测。
+构建目标为 **Apple 芯片上的 macOS 12 或更高版本**。0.1.17 在 **DC-S1H** 和运行 **macOS 27.0.1（26A434）** 的 **Apple M1 Max Mac** 上验证了 **5 Gbps** USB 链路和 **1600 × 1072** 实时取景。关闭取景后，连续三次按机身快门拍摄普通 RAW，三份 **6000 × 4000 RW2** 均通过完整解码，第三张自动显示在回看区。此前还验证了镜头双向 MF 调整和同一会话连续两张 **12000 × 8000 RW2** 的保存与完整解码。更多机型、系统版本和长时间拍摄尚待验证。「存储卡＋Mac」需要机身识别存储卡，也有待进一步实测。
 
 ## 恢复连接
 

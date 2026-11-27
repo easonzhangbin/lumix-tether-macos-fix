@@ -42,7 +42,8 @@ trap cleanup EXIT
 COMPILE_FLAGS=(-arch arm64 -mmacosx-version-min=12.0 -fobjc-arc -fblocks -Wall -Wextra -Werror -O2)
 /usr/bin/xcrun clang "${COMPILE_FLAGS[@]}" "$TASK_DIR/S1HNativePreviewApp.m" "$TASK_DIR/S1HControlPanel.m" \
     "$TASK_DIR/S1HBorderBeam.m" "$TASK_DIR/S1HCaptureConsole.m" "$TASK_DIR/S1HPreviewView.m" \
-    -framework Cocoa -framework QuartzCore -framework CoreText -o "$STAGED_APP/Contents/MacOS/$APP_EXECUTABLE"
+    "$TASK_DIR/S1HCapturedPhotoPreview.m" \
+    -framework Cocoa -framework QuartzCore -framework CoreText -framework ImageIO -o "$STAGED_APP/Contents/MacOS/$APP_EXECUTABLE"
 /usr/bin/xcrun clang "${COMPILE_FLAGS[@]}" "$PROJECT_ROOT/src/s1h_camera_service.m" \
     -framework Foundation -framework IOKit -o "$STAGED_APP/Contents/Resources/s1h_camera_service"
 /usr/bin/ditto --norsrc --noextattr --noacl "$WORKER_PATH" "$STAGED_APP/Contents/Resources/s1h_native_preview"
@@ -70,8 +71,8 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>S1HNativeTether</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.16</string>
-<key>CFBundleVersion</key><string>17</string>
+<key>CFBundleShortVersionString</key><string>0.1.17</string>
+<key>CFBundleVersion</key><string>18</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>

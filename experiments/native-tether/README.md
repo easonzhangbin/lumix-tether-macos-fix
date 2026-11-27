@@ -4,16 +4,20 @@
 
 An independent USB tethering app for still photography with the Panasonic **DC-S1H** on Apple silicon Macs. It grew out of a connection problem with official LUMIX Tether on our newer macOS test setup. Its AppKit interface and USB/PTP worker let us keep using the camera for studio work and bring originals directly into a Mac folder. [Panasonic’s published compatibility and downloads](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)
 
-[Download 0.1.16 for Apple silicon (PKG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.16/S1H-Native-Tether-0.1.16-arm64.pkg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.16)
+[Download 0.1.17 for Apple silicon (PKG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.17/S1H-Native-Tether-0.1.17-arm64.pkg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.17)
 
 ## Install and shoot
 
-1. Verify the PKG using the matching `.pkg.sha256` from the release page and run the PKG in Installer. The installer is unsigned and the app is ad-hoc signed. This release is distributed without Apple notarization. If macOS blocks it, check the source and checksum before deciding whether to open it. [Apple’s safe-opening guide](https://support.apple.com/en-us/102445)
+1. Verify the PKG using the matching `.pkg.sha256` from the release page and run the PKG in Installer. The installer is unsigned and the app is ad-hoc signed. The release is distributed without Apple notarization. The camera data panel uses system fonts. If macOS blocks it, check the source and checksum before deciding whether to open it. [Apple’s safe-opening guide](https://support.apple.com/en-us/102445)
 2. Quit other camera clients such as LUMIX Tether, Image Capture, and Preview. Connect the S1H with a USB data cable and select **PC(Tether)** on the camera. Open **S1H Native Tether.app** in **Applications** to start a connection attempt. Use **Connect** to start another attempt after pressing **Stop**.
 3. Choose a save folder or use `~/Pictures/S1H Tether`. **Capture and Save** defaults to **Save to Mac Only**. Photos taken with the physical shutter follow the camera’s active tether storage target.
 4. Wait for transfers to finish, then click **Stop** before unplugging the camera or switching camera apps.
 
-## What 0.1.16 does
+## What 0.1.17 does
+
+Use **Live View** in the toolbar to switch between the camera stream and photo review. Turning it off stops the camera stream while keeping the USB session open for shooting and transfers. The preview shows the latest JPEG or RW2 received by the app and keeps it visible during the next transfer. For photo review with the camera shutter, select a storage target that sends originals to the Mac. Live View is on by default and remembers your setting when you reopen the app. With Live View off at launch, the review pane fills after the first photo arrives.
+
+0.1.17 also fixes a transfer issue that could skip a new RAW during quick successive presses of the camera shutter. The camera can reuse a temporary image slot, so the app checks the reported file metadata to distinguish a new photo from a repeated event.
 
 - **Live view and camera settings** include Fit Window, 100% Actual Pixels, draggable 200% Zoom, a composition grid, and the camera’s available aperture, shutter speed, ISO, and white balance options.
 - **Remote Focus** provides one step per click with **Focus Forward** and **Focus Back**. Set the camera to MF and use an electronically controlled lens. If both buttons are inactive, refresh the camera settings after selecting MF.
@@ -25,7 +29,7 @@ For an XL RAW, choose **Photo → Image Quality 1 → High Resolution Mode → S
 
 ## Hardware checks and scope
 
-The build targets **macOS 12 or later on Apple silicon**. The tested pairing was a **DC-S1H and Apple M1 Max** on **macOS 27.0.1 (26A434)**. Tests reached **1600 × 1072** live view, verified lens movement in either MF direction, and saved and fully decoded consecutive **12000 × 8000 RW2** images from one session. Other models, other macOS versions, and long shoots need more hardware coverage. Card + Mac requires a card recognized by the camera and needs further hardware validation.
+The build targets **macOS 12 or later on Apple silicon**. In 0.1.17, a **DC-S1H** connected to an **Apple M1 Max** Mac running **macOS 27.0.1 (26A434)** reached **1600 × 1072** live view on a **5 Gbps** USB link. With live view off, three consecutive camera-shutter captures produced **6000 × 4000 RW2** files that each decoded in full. The third photo appeared automatically in review. Earlier releases verified lens movement in either MF direction and saved and fully decoded consecutive **12000 × 8000 RW2** images in one session. Other models, other macOS versions, and long shoots need more hardware coverage. Card + Mac requires a card recognized by the camera and needs further hardware validation.
 
 ## Recover a connection
 
