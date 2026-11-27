@@ -117,6 +117,14 @@ static NSString *usbLinkLabel(id speed) {
         [NSString stringWithFormat:@"USB %.3g Mbps", mbps];
 }
 
+static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
+    id interfaceID = snapshot[@"interface_registry_id"];
+    if (![snapshot[@"device_model_state"] isEqual:@"confirmed"] ||
+        ![snapshot[@"s1h_device_count"] isEqual:@1] || ![snapshot[@"s1h_interface_count"] isEqual:@1] ||
+        ![interfaceID isKindOfClass:NSNumber.class] || [interfaceID unsignedLongLongValue] == 0) return nil;
+    return interfaceID;
+}
+
 @interface PreviewApp : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property(nonatomic,strong) NSWindow *window;
 @property(nonatomic,strong) S1HPreviewView *previewView;
@@ -159,6 +167,9 @@ static NSString *usbLinkLabel(id speed) {
 @property(nonatomic,strong) NSURL *baseOutputURL;
 @property(nonatomic,strong) NSURL *outputURL;
 @property(nonatomic,copy) NSString *workerFailureMessage;
+@property(nonatomic) BOOL cameraInterfaceUnavailable;
+@property(nonatomic,copy) NSString *cameraInterfaceOwner;
+@property(nonatomic,strong) NSTask *cameraServiceTask;
 @property(nonatomic) NSUInteger reconnectDelay;
 @property(nonatomic) BOOL workerStopRequested;
 @property(nonatomic) BOOL desiredRunning;
@@ -201,8 +212,126 @@ static NSString *usbLinkLabel(id speed) {
     NSMenuItem *report = [button.menu addItemWithTitle:[self text:@"相机接口报告…" english:@"Camera Capability Report…"]
         action:@selector(showDeviceCapabilities:) keyEquivalent:@""];
     report.target = self;
+    NSMenuItem *release = [button.menu addItemWithTitle:[self text:@"解除系统相机占用…" english:@"Release System Camera Interface…"]
+        action:@selector(checkCameraService:) keyEquivalent:@""];
+    release.target = self;
     S1HStylePopup(button);
     return button;
+}
+- (BOOL)canCheckCameraService {
+    return self.cameraInterfaceUnavailable && !self.worker && !self.cameraServiceTask && !self.terminating &&
+        !self.pendingAction && !self.requiresReview && !self.staleSessionRecoveryRequired;
+}
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(checkCameraService:)) return [self canCheckCameraService];
+    return YES;
+}
+- (NSString *)cameraServiceFailure:(NSDictionary *)snapshot reason:(id)reason {
+    if (!snapshot || [reason isEqual:@"inspection_error"])
+        return [self text:@"无法核对相机接口的当前占用者。请重试。" english:@"Could not verify the camera interface owner. Try again."];
+    if ([reason isEqual:@"camera_apps_running"]) {
+        NSMutableArray<NSString *> *names = [NSMutableArray array];
+        for (NSDictionary *app in snapshot[@"known_camera_apps"]) {
+            id name = app[@"name"];
+            if ([name isKindOfClass:NSString.class] && [name length] && ![names containsObject:name])
+                [names addObject:name];
+        }
+        if (names.count)
+            return [NSString stringWithFormat:[self text:@"请先退出这些相机或导入应用：%@。"
+                english:@"Quit these camera or import apps first: %@."], [names componentsJoinedByString:@", "]];
+        return [self text:@"请先退出相机和照片导入软件。" english:@"Quit camera and photo import apps first."];
+    }
+    if ([reason isEqual:@"other_usb_ptp_interface_present"])
+        return [self text:@"检测到其他 USB 相机，未释放系统相机服务。" english:@"Another USB camera is connected. The service was left alone."];
+    if ([reason isEqual:@"expected_interface_changed"] || !cameraServiceInterfaceID(snapshot))
+        return [self text:@"请确认只连接一台处于 PC(Tether) 模式的 S1H，然后重新检查。"
+            english:@"Connect one S1H in PC(Tether) mode, then check again."];
+    if ([reason isEqual:@"owner_executable_mismatch"] || [reason isEqual:@"unknown_interface_owner"] ||
+        [reason isEqual:@"ownership_or_process_identity_changed"])
+        return [self text:@"占用者与可恢复的系统相机服务不匹配。请关闭其他相机软件后重试。"
+            english:@"The owner does not match the recoverable system camera service. Quit other camera apps and retry."];
+    return [self text:@"系统相机接口未确认释放。请检查占用状态后重试。"
+        english:@"The system camera interface was not confirmed released. Check ownership and try again."];
+}
+- (void)runCameraService:(NSArray<NSString *> *)arguments completion:(void (^)(NSDictionary *, BOOL))completion {
+    NSString *helper = [NSBundle.mainBundle pathForResource:@"s1h_camera_service" ofType:nil];
+    NSTask *task = [NSTask new];
+    NSPipe *output = [NSPipe pipe];
+    task.standardInput = NSFileHandle.fileHandleWithNullDevice;
+    task.standardOutput = output;
+    task.standardError = NSFileHandle.fileHandleWithNullDevice;
+    task.arguments = arguments;
+    if (helper) task.executableURL = [NSURL fileURLWithPath:helper];
+    if (!helper || ![task launchAndReturnError:nil]) {
+        self.stateLabel.stringValue = [self text:@"无法启动相机接口检查工具。" english:@"Could not start the camera interface helper."];
+        return;
+    }
+    self.cameraServiceTask = task;
+    [self setConnectButtonEnabled:NO];
+    self.stopButton.enabled = NO;
+    self.reconnectBox.enabled = NO;
+    self.metricsLabel.stringValue = @"—";
+    self.metricsLabel.toolTip = nil;
+    self.metricsLabel.textColor = NSColor.secondaryLabelColor;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSData *data = [output.fileHandleForReading readDataToEndOfFileAndReturnError:nil];
+        [task waitUntilExit];
+        id result = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+        BOOL success = task.terminationReason == NSTaskTerminationReasonExit && task.terminationStatus == 0;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self.cameraServiceTask = nil;
+            if (self.terminating) { [NSApp replyToApplicationShouldTerminate:YES]; return; }
+            [self setConnectButtonEnabled:YES];
+            self.reconnectBox.enabled = YES;
+            completion([result isKindOfClass:NSDictionary.class] ? result : nil, success);
+        });
+    });
+}
+- (void)checkCameraService:(id)sender {
+    (void)sender;
+    if (![self canCheckCameraService] || self.window.attachedSheet) return;
+    self.desiredRunning = NO;
+    self.generation += 1;
+    self.stopButton.enabled = NO;
+    self.stateLabel.stringValue = [self text:@"正在检查相机接口占用……" english:@"Checking camera interface ownership…"];
+    [self runCameraService:@[@"--inspect"] completion:^(NSDictionary *snapshot, BOOL success) {
+        NSNumber *interfaceID = cameraServiceInterfaceID(snapshot);
+        id guard = snapshot[@"restart_guard"];
+        if (success && interfaceID && [guard isEqual:@"no_owner"] && [snapshot[@"owner_state"] isEqual:@"none"]) {
+            [self startConnectionClosingStaleSession:NO];
+            return;
+        }
+        if (!success || !interfaceID || ![guard isEqual:@"opt_in_required"]) {
+            self.stateLabel.stringValue = [self cameraServiceFailure:snapshot reason:guard];
+            return;
+        }
+        // The service helper rechecks this exact USB interface and the owning process before sending any signal.
+        self.stateLabel.stringValue = [self text:@"S1H 的接口被 macOS 相机服务 ptpcamerad 占用。"
+            english:@"The macOS camera service ptpcamerad owns the S1H interface."];
+        if (self.window.attachedSheet) return;
+        NSAlert *confirmation = [NSAlert new];
+        confirmation.alertStyle = NSAlertStyleWarning;
+        confirmation.messageText = [self text:@"释放系统相机接口并连接？" english:@"Release the system camera interface and connect?"];
+        confirmation.informativeText = [self text:@"请先确认相机空闲、写卡灯已熄灭、没有照片正在导入或传输。操作会结束当前用户的 macOS 相机服务。若服务在正常退出超时后仍独占该接口，可能强制结束该服务。"
+            english:@"Confirm that the camera is idle, the card access light is off, and no import or transfer is running. This ends the macOS camera service for your user. If it still owns the interface after a graceful shutdown times out, it may be forced to quit."];
+        [confirmation addButtonWithTitle:[self text:@"取消" english:@"Cancel"]];
+        [confirmation addButtonWithTitle:[self text:@"释放并连接" english:@"Release and Connect"]];
+        [confirmation beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+            if (response != NSAlertSecondButtonReturn || ![self canCheckCameraService]) return;
+            self.stateLabel.stringValue = [self text:@"正在释放系统相机接口……" english:@"Releasing the system camera interface…"];
+            [self runCameraService:@[@"--release-camera-service", interfaceID.stringValue]
+                completion:^(NSDictionary *result, BOOL released) {
+                    NSDictionary *fresh = [result[@"inspection"] isKindOfClass:NSDictionary.class] ? result[@"inspection"] : nil;
+                    id outcome = result[@"status"];
+                    if (released && ([outcome isEqual:@"released"] || [outcome isEqual:@"not_needed"]) &&
+                        [cameraServiceInterfaceID(fresh) isEqual:interfaceID] && [fresh[@"owner_state"] isEqual:@"none"]) {
+                        [self startConnectionClosingStaleSession:NO];
+                        return;
+                    }
+                    self.stateLabel.stringValue = [self cameraServiceFailure:fresh reason:result[@"reason"]];
+                }];
+        }];
+    }];
 }
 - (void)previewZoomChanged:(NSMenuItem *)sender {
     self.previewView.pixelZoom = sender.tag;
@@ -225,8 +354,9 @@ static NSString *usbLinkLabel(id speed) {
     NSAlert *alert = [NSAlert new];
     alert.messageText = [self text:@"相机接口报告" english:@"Camera Capability Report"];
     if (![device isKindOfClass:NSDictionary.class]) {
-        alert.informativeText = [self text:@"连接相机并等待取景后，可查看相机上报的 PTP 接口。"
-                                    english:@"Connect the camera and wait for live view to inspect the reported PTP capabilities."];
+        alert.informativeText = [self canCheckCameraService] && self.workerFailureMessage.length ?
+            self.workerFailureMessage : [self text:@"连接相机并等待取景后，可查看相机上报的 PTP 接口。"
+                english:@"Connect the camera and wait for live view to inspect the reported PTP capabilities."];
         [alert beginSheetModalForWindow:self.window completionHandler:nil];
         return;
     }
@@ -392,7 +522,7 @@ static NSString *usbLinkLabel(id speed) {
 }
 - (void)start:(id)sender {
     (void)sender;
-    if (self.worker || self.pendingAction || self.terminating || self.window.attachedSheet) return;
+    if (self.worker || self.cameraServiceTask || self.pendingAction || self.terminating || self.window.attachedSheet) return;
     if (self.staleSessionRecoveryRequired) {
         NSAlert *confirmation = [NSAlert new];
         confirmation.alertStyle = NSAlertStyleWarning;
@@ -410,7 +540,7 @@ static NSString *usbLinkLabel(id speed) {
     [self startConnectionClosingStaleSession:NO];
 }
 - (void)startConnectionClosingStaleSession:(BOOL)closeStaleSession {
-    if (self.worker || self.pendingAction || self.terminating) return;
+    if (self.worker || self.cameraServiceTask || self.pendingAction || self.terminating) return;
     if (self.requiresReview) [self.controlPanel setResultMessage:nil];
     self.requiresReview = NO;
     self.reconnectDelay = 0;
@@ -453,7 +583,7 @@ static NSString *usbLinkLabel(id speed) {
     }
 }
 - (void)launchWorkerClosingStaleSession:(BOOL)closeStaleSession {
-    if (!self.desiredRunning || self.worker || self.terminating || self.requiresReview ||
+    if (!self.desiredRunning || self.worker || self.cameraServiceTask || self.terminating || self.requiresReview ||
         (self.staleSessionRecoveryRequired && !closeStaleSession)) return;
     NSString *helper = [NSBundle.mainBundle pathForResource:@"s1h_native_preview" ofType:nil];
     if (!helper || ![NSFileManager.defaultManager isExecutableFileAtPath:helper]) {
@@ -472,6 +602,8 @@ static NSString *usbLinkLabel(id speed) {
     self.cameraReady = NO;
     self.captureAvailable = NO;
     self.workerFailureMessage = nil;
+    self.cameraInterfaceUnavailable = NO;
+    self.cameraInterfaceOwner = nil;
     self.pendingAction = nil;
     self.cameraTransferID = nil;
     self.cameraTransferStatus = nil;
@@ -492,6 +624,7 @@ static NSString *usbLinkLabel(id speed) {
     self.updatesPerSecond = -1;
     self.metricsLabel.stringValue = @"—";
     self.metricsLabel.toolTip = nil;
+    self.metricsLabel.textColor = NSColor.secondaryLabelColor;
     [self pruneOldRuns];
     [self setConnectButtonEnabled:NO];
     self.stopButton.enabled = YES;
@@ -610,6 +743,7 @@ static NSString *usbLinkLabel(id speed) {
     if (self.workerFailureMessage.length) {
         self.metricsLabel.stringValue = self.workerFailureMessage;
         self.metricsLabel.toolTip = self.workerFailureMessage;
+        self.metricsLabel.textColor = self.cameraInterfaceOwner.length ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
     }
     if (self.reconnectBox.state != NSControlStateValueOn) {
         self.desiredRunning = NO;
@@ -630,7 +764,7 @@ static NSString *usbLinkLabel(id speed) {
 }
 - (void)reconnectChanged:(id)sender {
     (void)sender;
-    if (self.reconnectBox.state == NSControlStateValueOff && !self.worker) [self stop:nil];
+    if (self.reconnectBox.state == NSControlStateValueOff && !self.worker && !self.cameraServiceTask) [self stop:nil];
 }
 - (void)qualityChanged:(id)sender {
     (void)sender;
@@ -651,6 +785,9 @@ static NSString *usbLinkLabel(id speed) {
     if (!task) {
         [self setConnectButtonEnabled:YES];
         self.stopButton.enabled = NO;
+        self.metricsLabel.stringValue = @"—";
+        self.metricsLabel.toolTip = nil;
+        self.metricsLabel.textColor = NSColor.secondaryLabelColor;
         if (self.requiresReview) [self showCaptureReviewRequired];
         else if (self.staleSessionRecoveryRequired) [self showStaleSessionRecoveryRequired];
         else self.stateLabel.stringValue = [self text:@"已停止。" english:@"Stopped."];
@@ -1008,8 +1145,25 @@ static NSString *usbLinkLabel(id speed) {
     if ([state isEqualToString:@"error"] && message.length && ![message isEqualToString:state]) {
         if ([message isEqualToString:@"Connect exactly one DC-S1H in PC(Tether) mode; its registry identity must be readable."])
             message = [self text:@"请连接一台 DC-S1H，并在机身选择 PC(Tether)。" english:message];
-        else if ([message isEqualToString:@"Camera interface unavailable. Close other camera/import software first."])
-            message = [self text:@"相机接口不可用。请先退出其他相机或照片导入软件。" english:message];
+        else if ([message isEqualToString:@"Camera interface unavailable. Close other camera/import software first."]) {
+            self.cameraInterfaceUnavailable = YES;
+            id owner = status[@"usb_interface_owner"];
+            self.cameraInterfaceOwner = [owner isKindOfClass:NSString.class] ? owner : nil;
+            if (self.cameraInterfaceOwner.length) {
+                BOOL systemService = [self.cameraInterfaceOwner isEqualToString:@"ptpcamerad"];
+                NSString *name = systemService ?
+                    [self text:@"macOS 相机服务（ptpcamerad）" english:@"macOS camera service (ptpcamerad)"] : self.cameraInterfaceOwner;
+                NSString *format = systemService ?
+                    [self text:@"相机接口被 %@ 占用。取景与诊断 → 解除系统相机占用…"
+                        english:@"Camera interface in use by %@. View & Tools → Release System Camera Interface…"] :
+                    [self text:@"相机接口被 %@ 占用。请在该软件中断开相机，再重新连接。"
+                        english:@"Camera interface in use by %@. Disconnect the camera in that app, then reconnect."];
+                message = [NSString stringWithFormat:format, name];
+            } else {
+                message = [self text:@"相机接口无法打开。取景与诊断 → 解除系统相机占用…"
+                    english:@"Unable to open the camera interface. View & Tools → Release System Camera Interface…"];
+            }
+        }
         self.workerFailureMessage = message;
     }
     NSDictionary *controls = [status[@"controls"] isKindOfClass:NSDictionary.class] ? status[@"controls"] : @{};
@@ -1141,6 +1295,10 @@ static NSString *usbLinkLabel(id speed) {
 }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
     (void)sender;
+    if (self.cameraServiceTask) {
+        self.terminating = YES;
+        return NSTerminateLater;
+    }
     if (!self.worker) return NSTerminateNow;
     self.terminating = YES;
     [self stop:nil];

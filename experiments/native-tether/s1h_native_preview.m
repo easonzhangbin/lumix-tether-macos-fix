@@ -291,6 +291,7 @@ static void begin_watchdog(void) {
 @property(nonatomic, strong) NSMutableDictionary *formatMetadata;
 @property(nonatomic, strong) NSDictionary *deviceCapabilities;
 @property(nonatomic, strong) NSNumber *usbLinkSpeed;
+@property(nonatomic, copy) NSString *usbInterfaceOwner;
 @property(nonatomic, strong) NSNumber *batteryPercent;
 @property(nonatomic, strong) NSDictionary *controls;
 @property(nonatomic, strong) NSDictionary *actionStatus;
@@ -316,6 +317,7 @@ static void begin_watchdog(void) {
     if (_formatMetadata) status[@"preview_format"] = _formatMetadata;
     if (_deviceCapabilities) status[@"device_capabilities"] = _deviceCapabilities;
     if (_usbLinkSpeed) status[@"usb_link_bps"] = _usbLinkSpeed;
+    if (_usbInterfaceOwner && [state isEqualToString:@"error"]) status[@"usb_interface_owner"] = _usbInterfaceOwner;
     if (_batteryPercent) status[@"battery_percent"] = _batteryPercent;
     if (_controls) status[@"controls"] = _controls;
     if (_actionStatus) status[@"action_status"] = _actionStatus;
@@ -576,6 +578,7 @@ static NSString *append_capture_events(NSMutableData *pending, NSMutableArray<NS
 @property(nonatomic, strong) IOUSBHostPipe *output;
 @property(nonatomic, strong) IOUSBHostPipe *events;
 @property(nonatomic, strong) NSNumber *usbLinkSpeed;
+@property(nonatomic, copy) NSString *usbInterfaceOwner;
 @property(nonatomic, strong) NSMutableData *eventPending;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *eventQueue;
 @property(nonatomic) double eventFragmentDeadline;
@@ -647,8 +650,29 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
     return [property isKindOfClass:NSString.class] ? property : @"";
 }
 
+static NSString *interface_owner_name(id property) {
+    if (![property isKindOfClass:NSString.class]) return nil;
+    NSString *label = property;
+    if (label.length > 256 || ![label hasPrefix:@"pid "]) return nil;
+    NSRange separator = [label rangeOfString:@", "];
+    if (separator.location == NSNotFound || separator.location <= 4) return nil;
+    unsigned int pid = 0;
+    for (NSUInteger i = 4; i < separator.location; ++i) {
+        unichar digit = [label characterAtIndex:i];
+        if (digit < '0' || digit > '9' || pid > ((unsigned int)INT_MAX - (digit - '0')) / 10) return nil;
+        pid = pid * 10 + (digit - '0');
+    }
+    if (!pid) return nil;
+    NSString *name = [label substringFromIndex:NSMaxRange(separator)];
+    if ([name rangeOfCharacterFromSet:NSCharacterSet.controlCharacterSet].location != NSNotFound ||
+        [name rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound) return nil;
+    name = [name stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+    return name.length ? name : nil;
+}
+
 @implementation NativePreviewTransport
 - (BOOL)openInterface {
+    _usbInterfaceOwner = nil;
     phase_deadline(5);
     CFMutableDictionaryRef match = [IOUSBHostInterface createMatchingDictionaryWithVendorID:@0x04da
         productID:@0x2382 bcdDevice:nil interfaceNumber:@0 configurationValue:@1 interfaceClass:@6
@@ -684,6 +708,13 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
     if ([speed isKindOfClass:NSNumber.class] && [speed longLongValue] > 0) _usbLinkSpeed = speed;
     _interface = [[IOUSBHostInterface alloc] initWithIOService:selected options:IOUSBHostObjectInitOptionsNone
         queue:queue error:&error interestHandler:nil];
+    if (!_interface) {
+        // Only this exact PTP interface's exclusive owner can explain the
+        // failure. A parent device client does not imply interface ownership.
+        id owner = CFBridgingRelease(IORegistryEntryCreateCFProperty(selected, CFSTR("UsbExclusiveOwner"),
+            kCFAllocatorDefault, 0));
+        _usbInterfaceOwner = interface_owner_name(owner);
+    }
     IOObjectRelease(selected);
     if (!_interface) {
         show_error("Open S1H interface without seizure", error);
@@ -1395,7 +1426,10 @@ static int run_preview(PreviewOptions *options) {
         @"restore_status": @"not_changed"} mutableCopy];
     NSString *failure = nil;
     [status update:@"connecting" message:@"Connecting to DC-S1H."];
-    if (![transport openInterface]) failure = transport.error;
+    if (![transport openInterface]) {
+        failure = transport.error;
+        status.usbInterfaceOwner = transport.usbInterfaceOwner;
+    }
     if (!failure) {
         status.usbLinkSpeed = transport.usbLinkSpeed;
         [status update:@"draining" message:@"Preparing the camera connection."];
@@ -1721,6 +1755,13 @@ static int self_test(void) {
           !parse_parent_pid("2.0", NULL) && !parse_parent_pid(" 2", NULL) &&
           !parse_parent_pid("2147483648", NULL) && !parse_parent_pid("", NULL),
           "Parent PID rejects invalid, fractional, and overflowing input");
+    CHECK([interface_owner_name(@"pid 21863, ptpcamerad") isEqual:@"ptpcamerad"] &&
+          [interface_owner_name(@"pid 1, A Camera App") isEqual:@"A Camera App"] &&
+          !interface_owner_name(@"pid 0, owner") && !interface_owner_name(@"pid -1, owner") &&
+          !interface_owner_name(@"pid +1, owner") && !interface_owner_name(@"pid 2147483648, owner") &&
+          !interface_owner_name(@"pid 1, ") && !interface_owner_name(@"pid 1,owner") &&
+          !interface_owner_name(@"pid 1, owner\nname") && !interface_owner_name(@1),
+          "Exclusive owner status only exposes a display name from a valid registry label");
     CHECK(!parent_changed(42, 42) && parent_changed(42, 1) && parent_changed(42, 43),
           "Parent identity change requests cancellation only after a change");
     CHECK(!parent_changed(0, 1) && !parent_changed(0, 42),
