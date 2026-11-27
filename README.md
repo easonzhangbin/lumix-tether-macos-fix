@@ -1,6 +1,22 @@
-# LUMIX Connection Guardian
+# LUMIX S1H Tethering for macOS
 
 [简体中文](README.zh-CN.md)
+
+## S1H Native Tether 0.1.14
+
+**USB tethered still photography for the Panasonic DC-S1H on Apple silicon Macs.**
+
+This project started with a DC-S1H that struggled to connect to official LUMIX Tether on our newer macOS test setup. S1H Native Tether keeps that camera useful for studio work with its own AppKit interface and USB/PTP worker. It provides live view, remote shutter and original-file transfer without requiring Panasonic's app. [Panasonic’s published compatibility and downloads](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)
+
+[Download Native Tether 0.1.14 (Apple silicon PKG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.14/S1H-Native-Tether-0.1.14-arm64.pkg) · [Portable ZIP](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.14/S1H-Native-Tether-0.1.14-arm64.zip) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.14) · [Setup and source](experiments/native-tether/README.md)
+
+- Inspect focus with 100% and 200% live-view zoom and nudge an electronically controlled lens in either direction in MF mode.
+- Capture from the software or camera shutter, follow RAW transfer progress, and put the originals into a chosen folder with optional custom numbering.
+- See USB link rate and compatible camera battery readings. Reconnect after an interruption, or review a local PTP capability report when troubleshooting.
+
+The build targets Apple silicon and macOS 12 or later. The tested setup is a DC-S1H on an Apple M1 Max Mac running macOS 27.0.1. Hardware checks reached 1600 × 1072 live view, verified lens movement in both directions, and saved and fully decoded consecutive 12000 × 8000 RW2 images.
+
+## LUMIX Connection Guardian
 
 <img src="experiments/connection-guardian/assets/GuardianAppIcon-source-v1.png" alt="LUMIX Connection Guardian app icon" width="120">
 
@@ -11,10 +27,6 @@ An independent Apple Silicon menu-bar utility that prepares the S1H USB connecti
 [Download Guardian 0.2.5 beta for Apple Silicon (DMG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/guardian-v0.2.5/LUMIX-Connection-Guardian-0.2.5-arm64.dmg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5) · [Detailed guide](experiments/connection-guardian/README.md) · [Earlier recovery scripts](docs/CLI.md)
 
 This is a community beta tested on one S1H setup. It is not affiliated with Panasonic or Apple. Official Tether must be installed separately; the download contains this project's own app and helpers only.
-
-## S1H Native Tether
-
-The standalone Apple Silicon app connects directly to the DC-S1H over USB for live view, remote shutter, exposure controls, and original-file transfer. [Download Native Tether 0.1.6](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.6) · [Setup and source](experiments/native-tether/README.md)
 
 ## High Resolution Diagnostic in 0.2.5
 

@@ -34,10 +34,18 @@ trap cleanup EXIT
 /bin/mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 /usr/bin/xcrun clang -arch arm64 -mmacosx-version-min=12.0 -fobjc-arc -fblocks \
     -Wall -Wextra -Werror -O2 "$TASK_DIR/S1HNativePreviewApp.m" "$TASK_DIR/S1HControlPanel.m" \
-    "$TASK_DIR/S1HBorderBeam.m" \
-    -framework Cocoa -framework QuartzCore -o "$STAGED_APP/Contents/MacOS/$APP_EXECUTABLE"
+    "$TASK_DIR/S1HBorderBeam.m" "$TASK_DIR/S1HCaptureConsole.m" "$TASK_DIR/S1HPreviewView.m" \
+    -framework Cocoa -framework QuartzCore -framework CoreText -o "$STAGED_APP/Contents/MacOS/$APP_EXECUTABLE"
 /usr/bin/ditto --norsrc --noextattr --noacl "$WORKER_PATH" "$STAGED_APP/Contents/Resources/s1h_native_preview"
 /usr/bin/ditto --norsrc --noextattr --noacl "$ICON_PATH" "$STAGED_APP/Contents/Resources/AppIcon.icns"
+/usr/bin/ditto --norsrc --noextattr --noacl "$TASK_DIR/LICENSE" "$STAGED_APP/Contents/Resources/LICENSE.txt"
+for font in LG1055-Light.ttf LG1055_R.ttf; do
+    font_path="$TASK_DIR/private/fonts/$font"
+    if [[ -f "$font_path" ]]; then
+        /bin/mkdir -p "$STAGED_APP/Contents/Resources/Fonts"
+        /usr/bin/ditto --norsrc --noextattr --noacl "$font_path" "$STAGED_APP/Contents/Resources/Fonts/$font"
+    fi
+done
 /usr/bin/codesign --force --sign - --timestamp=none "$STAGED_APP/Contents/Resources/s1h_native_preview"
 cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -49,8 +57,8 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>S1HNativeTether</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.6</string>
-<key>CFBundleVersion</key><string>7</string>
+<key>CFBundleShortVersionString</key><string>0.1.14</string>
+<key>CFBundleVersion</key><string>15</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>

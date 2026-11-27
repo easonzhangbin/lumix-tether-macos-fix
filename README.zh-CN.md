@@ -1,6 +1,22 @@
-# LUMIX Connection Guardian
+# LUMIX S1H 的 macOS 联机工具
 
 [English](README.md)
+
+## S1H Native Tether 0.1.14
+
+**面向 Apple 芯片 Mac 和松下 DC-S1H 的独立 USB 联机拍摄工具。**
+
+这个项目起于一台 DC-S1H 在较新的 macOS 测试环境里难以连上原厂 LUMIX Tether。我们希望继续用这台相机做棚拍，因此用原生 AppKit 界面和 USB／PTP 通信进程，提供取景、遥控快门和原片传输。应用可独立运行。 [松下公布的兼容信息与下载](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)
+
+[下载 Native Tether 0.1.14（Apple 芯片 PKG）](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.14/S1H-Native-Tether-0.1.14-arm64.pkg) · [便携版 ZIP](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.14/S1H-Native-Tether-0.1.14-arm64.zip) · [发布说明与 SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.14) · [安装与源码](experiments/native-tether/README.zh-CN.md)
+
+- 取景支持 100% 实际像素和 200% 放大。机身设为 MF 后，可单步向前或向后调整支持电子对焦的镜头。
+- 支持软件及机身快门、RAW 传输进度、自选保存目录和文件名前缀自动编号。
+- 显示 USB 协商速率及相机报告的电量。断开后可重连，排查时可查看本地 PTP 接口报告。
+
+构建目标为 Apple 芯片及 macOS 12 或更高版本。实机测试使用 DC-S1H 和运行 macOS 27.0.1 的 Apple M1 Max Mac，已验证 1600 × 1072 实时取景、镜头双向调焦，以及同一会话连续两张 12000 × 8000 RW2 的保存与完整解码。
+
+## LUMIX Connection Guardian
 
 <img src="experiments/connection-guardian/assets/GuardianAppIcon-source-v1.png" alt="LUMIX 连接守护应用图标" width="120">
 
@@ -11,10 +27,6 @@
 [下载 Guardian 0.2.5 测试版（Apple Silicon DMG）](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/guardian-v0.2.5/LUMIX-Connection-Guardian-0.2.5-arm64.dmg) · [版本说明与 SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5) · [详细说明](experiments/connection-guardian/README.zh-CN.md) · [早期恢复脚本](docs/CLI.zh-CN.md)
 
 当前为在一套 S1H 环境验证的社区测试版，与松下或 Apple 无隶属关系。用户需另行安装官方 Tether；下载包只包含本项目应用及辅助程序。
-
-## S1H Native Tether 独立联机拍摄
-
-独立的 Apple Silicon 应用通过 USB 直连 DC-S1H，支持实时取景、软件快门、曝光控制和原片传输。[下载 Native Tether 0.1.6](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.6) · [使用说明与源码](experiments/native-tether/README.zh-CN.md)
 
 ## 0.2.5 摇摇乐诊断
 

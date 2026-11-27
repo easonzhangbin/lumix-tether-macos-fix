@@ -107,7 +107,7 @@ static NSMutableData *make_buffer(IOUSBHostInterface *interface,
 static BOOL transfer_timed(IOUSBHostPipe *pipe, NSMutableData *data,
                            const char *label, NSUInteger *actual, BOOL *callbackReceived,
                            NSTimeInterval completionTimeout, NSTimeInterval waitTimeout,
-                           IOReturn *completionStatus) {
+                           IOReturn *completionStatus, BOOL logSuccess) {
     if (callbackReceived) *callbackReceived = NO;
     if (completionStatus) *completionStatus = kIOReturnError;
     dispatch_semaphore_t completed = dispatch_semaphore_create(0);
@@ -137,9 +137,9 @@ static BOOL transfer_timed(IOUSBHostPipe *pipe, NSMutableData *data,
             show_error("abort", abortError);
         return NO;
     }
-    printf("%s: completion=0x%08x API-reported-bytes=%lu requested=%lu\n", label,
-           (unsigned int)status, (unsigned long)count,
-           (unsigned long)data.length);
+    if (logSuccess || status != kIOReturnSuccess || count > data.length)
+        printf("%s: completion=0x%08x API-reported-bytes=%lu requested=%lu\n", label,
+               (unsigned int)status, (unsigned long)count, (unsigned long)data.length);
     if (actual) *actual = count;
     if (callbackReceived) *callbackReceived = YES;
     if (completionStatus) *completionStatus = status;
@@ -176,7 +176,7 @@ static BOOL drain_input(IOUSBHostInterface *interface, IOUSBHostPipe *in,
         BOOL callbackReceived = NO;
         IOReturn status = kIOReturnError;
         BOOL ok = transfer_timed(in, data, "drain bulk IN 0x82", &count,
-                                  &callbackReceived, ioTimeout, waitTimeout, &status);
+                                  &callbackReceived, ioTimeout, waitTimeout, &status, YES);
         if (!ok) {
             /* 0xe0004051 is the legacy USB transaction timeout value; modern
              * IOUSBHost normally returns kIOReturnTimeout (0xe00002d6). */
@@ -275,6 +275,7 @@ static void begin_watchdog(void) {
 @property(nonatomic) BOOL closeStaleSession;
 @property(nonatomic, strong) NSNumber *explicitStorageTarget;
 @property(nonatomic, copy) NSString *cameraSaveDirectory;
+@property(nonatomic, copy) NSString *photoNamePrefix;
 @property(nonatomic) BOOL verbose;
 @end
 @implementation PreviewOptions
@@ -288,6 +289,9 @@ static void begin_watchdog(void) {
 @property(nonatomic) double previewStart;
 @property(nonatomic, copy) NSString *writeError;
 @property(nonatomic, strong) NSMutableDictionary *formatMetadata;
+@property(nonatomic, strong) NSDictionary *deviceCapabilities;
+@property(nonatomic, strong) NSNumber *usbLinkSpeed;
+@property(nonatomic, strong) NSNumber *batteryPercent;
 @property(nonatomic, strong) NSDictionary *controls;
 @property(nonatomic, strong) NSDictionary *actionStatus;
 @property(nonatomic, strong) NSDictionary *captureStorage;
@@ -295,25 +299,31 @@ static void begin_watchdog(void) {
 @property(nonatomic) BOOL captureAvailable;
 @property(nonatomic) BOOL requiresReview;
 @property(nonatomic) BOOL staleSession;
+@property(nonatomic) double lastStatusWrite;
+@property(nonatomic) BOOL lastReportedCaptureAvailable;
 - (BOOL)update:(NSString *)state message:(NSString *)message;
 - (BOOL)publish:(NSData *)jpeg width:(NSUInteger)width height:(NSUInteger)height;
 @end
 @implementation PreviewStatus
 - (BOOL)update:(NSString *)state message:(NSString *)message {
     double elapsed = _previewStart > 0 ? MAX(0, monotonic_seconds() - _previewStart) : 0;
+    BOOL captureAvailable = _captureAvailable && !_requiresReview && [state isEqualToString:@"previewing"];
     NSMutableDictionary *status = [@{@"schema_version": @1, @"status": state, @"frames": @(_frames),
                             @"width": @(_width), @"height": @(_height),
                             @"elapsed_seconds": @(elapsed),
                             @"fps": @(elapsed > 0 ? (double)_frames / elapsed : 0),
                             @"cancelled": @((BOOL)(StopRequested != 0)), @"message": message ?: @""} mutableCopy];
     if (_formatMetadata) status[@"preview_format"] = _formatMetadata;
+    if (_deviceCapabilities) status[@"device_capabilities"] = _deviceCapabilities;
+    if (_usbLinkSpeed) status[@"usb_link_bps"] = _usbLinkSpeed;
+    if (_batteryPercent) status[@"battery_percent"] = _batteryPercent;
     if (_controls) status[@"controls"] = _controls;
     if (_actionStatus) status[@"action_status"] = _actionStatus;
     if (_captureStorage) status[@"capture_storage"] = _captureStorage;
     if (_cameraTransfer) status[@"camera_transfer"] = _cameraTransfer;
     status[@"requires_review"] = @(_requiresReview);
     status[@"stale_session"] = @(_staleSession);
-    status[@"capture_available"] = @(_captureAvailable && !_requiresReview && [state isEqualToString:@"previewing"]);
+    status[@"capture_available"] = @(captureAvailable);
     NSError *error = nil;
     NSData *data = [NSJSONSerialization dataWithJSONObject:status options:NSJSONWritingPrettyPrinted error:&error];
     if (!data || ![data writeToURL:[_directory URLByAppendingPathComponent:@"status.json"]
@@ -321,6 +331,8 @@ static void begin_watchdog(void) {
         _writeError = @"Could not write status.json.";
         return NO;
     }
+    _lastStatusWrite = monotonic_seconds();
+    _lastReportedCaptureAvailable = captureAvailable;
     return YES;
 }
 - (BOOL)publish:(NSData *)jpeg width:(NSUInteger)width height:(NSUInteger)height {
@@ -330,9 +342,15 @@ static void begin_watchdog(void) {
         _writeError = @"Could not write latest.jpg.";
         return NO;
     }
+    BOOL dimensionsChanged = _width != width || _height != height;
     ++_frames;
     _width = width;
     _height = height;
+    // JPEG delivery and capture state changes should remain immediate. The
+    // frame counters alone can be sampled without rewriting JSON per frame.
+    BOOL captureAvailable = _captureAvailable && !_requiresReview;
+    if (_frames > 1 && !dimensionsChanged && captureAvailable == _lastReportedCaptureAvailable &&
+        monotonic_seconds() - _lastStatusWrite < 0.25) return YES;
     return [self update:@"previewing" message:@"Native USB preview is running."];
 }
 @end
@@ -492,13 +510,15 @@ static BOOL format_data_allowed(uint16_t opcode, NSArray<NSNumber *> *parameters
     return opcode == 0x9415 && parameters.count == 1 && parameters.firstObject.unsignedIntValue == 0x0d800011 &&
         parse_current_format(data, NULL) != nil;
 }
-static NSData *pack_format_data_container(NSData *payload, uint32_t transaction) {
-    if (!format_data_allowed(0x9415, @[@0x0d800011], payload)) return nil;
-    NSMutableData *data = [NSMutableData dataWithLength:28];
-    unsigned char *bytes = data.mutableBytes;
-    write32(bytes, 28); write16(bytes + 4, 2); write16(bytes + 6, 0x9415); write32(bytes + 8, transaction);
+static BOOL write_data_container(NSMutableData *buffer, NSData *payload, uint16_t opcode, uint32_t transaction) {
+    if (!payload.length || payload.length > MAX_CONTAINER_LENGTH - 12 || buffer.length != 12 + payload.length) return NO;
+    unsigned char *bytes = buffer.mutableBytes;
+    write32(bytes, (uint32_t)buffer.length);
+    write16(bytes + 4, 2);
+    write16(bytes + 6, opcode);
+    write32(bytes + 8, transaction);
     memcpy(bytes + 12, payload.bytes, payload.length);
-    return data;
+    return YES;
 }
 
 static BOOL opcode_allowed(uint16_t opcode, NSArray<NSNumber *> *parameters) {
@@ -527,13 +547,38 @@ static BOOL opcode_allowed(uint16_t opcode, NSArray<NSNumber *> *parameters) {
 @implementation PreviewInterruptRead
 @end
 
+static const double CaptureEventFragmentTimeout = 2.0;
+
+static NSString *append_capture_events(NSMutableData *pending, NSMutableArray<NSDictionary *> *queue,
+                                       NSData *buffer, NSUInteger length, double now, double *fragmentDeadline) {
+    if (length > buffer.length) return @"Capture interrupt I/O exceeded its buffer.";
+    if (length) [pending appendBytes:buffer.bytes length:length];
+    while (pending.length >= 12) {
+        const unsigned char *bytes = pending.bytes;
+        uint32_t size = read32(bytes);
+        if (size < 12 || size > 24 || (size - 12) % 4 || read16(bytes + 4) != 4)
+            return @"Capture interrupt event has an invalid container header.";
+        if (pending.length < size) break;
+        if (queue.count >= 32) return @"Capture event queue exceeded its bound.";
+        NSMutableArray *parameters = [NSMutableArray array];
+        for (NSUInteger offset = 12; offset < size; offset += 4) [parameters addObject:@(read32(bytes + offset))];
+        [queue addObject:@{@"code":@(read16(bytes + 6)), @"transaction":@(read32(bytes + 8)), @"parameters":parameters}];
+        [pending replaceBytesInRange:NSMakeRange(0, size) withBytes:NULL length:0];
+        *fragmentDeadline = 0;
+    }
+    if (pending.length && !*fragmentDeadline) *fragmentDeadline = now + CaptureEventFragmentTimeout;
+    return nil;
+}
+
 @interface NativePreviewTransport : NSObject
 @property(nonatomic, strong) IOUSBHostInterface *interface;
 @property(nonatomic, strong) IOUSBHostPipe *input;
 @property(nonatomic, strong) IOUSBHostPipe *output;
 @property(nonatomic, strong) IOUSBHostPipe *events;
+@property(nonatomic, strong) NSNumber *usbLinkSpeed;
 @property(nonatomic, strong) NSMutableData *eventPending;
 @property(nonatomic, strong) NSMutableArray<NSDictionary *> *eventQueue;
+@property(nonatomic) double eventFragmentDeadline;
 @property(nonatomic, strong) PreviewInterruptRead *eventRead;
 @property(nonatomic, strong) PreviewReader *reader;
 @property(nonatomic) uint32_t nextTransaction;
@@ -554,10 +599,8 @@ static BOOL opcode_allowed(uint16_t opcode, NSArray<NSNumber *> *parameters) {
 - (void)closeInterface;
 @end
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
 #include "S1HNativeControl.inc"
-#pragma clang diagnostic pop
+#include "S1HNativeFocus.inc"
 
 static BOOL s1h_capture_request_allowed(uint16_t opcode, NSArray<NSNumber *> *parameters) {
     if (opcode == 0x9404) return parameters.count == 1 && parameters[0].unsignedIntValue == 0x03000011;
@@ -583,6 +626,13 @@ static BOOL s1h_storage_inspection_allowed(uint16_t opcode, NSArray<NSNumber *> 
         (opcode == 0x940a && parameters.count == 1 && parameters[0].unsignedIntValue == 0x08000090);
 }
 
+enum { S1HBatteryDescriptorOpcode = 0x1014, S1HBatteryValueOpcode = 0x1015, S1HBatteryProperty = 0x5001 };
+
+static BOOL s1h_battery_read_allowed(uint16_t opcode, NSArray<NSNumber *> *parameters) {
+    return (opcode == S1HBatteryDescriptorOpcode || opcode == S1HBatteryValueOpcode) &&
+        parameters.count == 1 && parameters.firstObject.unsignedIntValue == S1HBatteryProperty;
+}
+
 static BOOL s1h_capture_target_data_allowed(uint16_t opcode, NSArray<NSNumber *> *parameters, NSData *payload) {
     if (opcode != 0x940b || parameters.count != 1 || payload.length != 10) return NO;
     uint32_t selector = parameters[0].unsignedIntValue;
@@ -603,7 +653,10 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
     CFMutableDictionaryRef match = [IOUSBHostInterface createMatchingDictionaryWithVendorID:@0x04da
         productID:@0x2382 bcdDevice:nil interfaceNumber:@0 configurationValue:@1 interfaceClass:@6
         interfaceSubclass:@1 interfaceProtocol:@1 speed:nil productIDArray:nil];
+    if (!match) { _error = @"Could not create the camera interface match."; return NO; }
     io_iterator_t iterator = IO_OBJECT_NULL;
+    // IOUSBHostInterface.h documents a caller-owned dictionary. IOKit
+    // consumes this reference whether or not the matching request succeeds.
     kern_return_t status = IOServiceGetMatchingServices(kIOMainPortDefault, match, &iterator);
     if (status != KERN_SUCCESS) { _error = @"Could not inspect the camera interface."; return NO; }
     io_service_t selected = IO_OBJECT_NULL, entry;
@@ -626,6 +679,9 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
     }
     NSError *error = nil;
     dispatch_queue_t queue = dispatch_queue_create("local.s1h.experimental-preview.io", DISPATCH_QUEUE_SERIAL);
+    id speed = CFBridgingRelease(IORegistryEntrySearchCFProperty(selected, kIOServicePlane, CFSTR("UsbLinkSpeed"),
+        kCFAllocatorDefault, kIORegistryIterateRecursively | kIORegistryIterateParents));
+    if ([speed isKindOfClass:NSNumber.class] && [speed longLongValue] > 0) _usbLinkSpeed = speed;
     _interface = [[IOUSBHostInterface alloc] initWithIOService:selected options:IOUSBHostObjectInitOptionsNone
         queue:queue error:&error interestHandler:nil];
     IOObjectRelease(selected);
@@ -657,7 +713,7 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
             NSUInteger actual = 0;
             double responseTimeout = transport.responseTimeout > 0 ? transport.responseTimeout : IO_TIMEOUT;
             BOOL ok = transfer_timed(transport.input, buffer, "PTP bulk IN", &actual, NULL,
-                MIN(responseTimeout, remaining), MIN(responseTimeout + 0.5, remaining), NULL);
+                MIN(responseTimeout, remaining), MIN(responseTimeout + 0.5, remaining), NULL, transport.verbose);
             if (!ok) { transport.error = @"Native bulk IN failed or timed out."; return nil; }
             if (actual) return [NSData dataWithBytes:buffer.bytes length:actual];
             printf("Skipping successful bulk IN zero-length packet within the existing transaction deadline.\n");
@@ -683,10 +739,12 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
 }
 - (PreviewReply *)request:(uint16_t)opcode parameters:(NSArray<NSNumber *> *)parameters dataExpected:(BOOL)expected dataOut:(NSData *)dataOut {
     BOOL allowed = dataOut ? (!expected && (format_data_allowed(opcode, parameters, dataOut) ||
-        (_interactiveEnabled && s1h_control_data_allowed(opcode, parameters, dataOut)) ||
+        (_interactiveEnabled && (s1h_control_data_allowed(opcode, parameters, dataOut) ||
+                                 s1h_focus_data_allowed(opcode, parameters, dataOut))) ||
          (_controlReadEnabled && s1h_capture_target_data_allowed(opcode, parameters, dataOut)))) :
         (opcode_allowed(opcode, parameters) || (_controlReadEnabled && expected &&
-         (s1h_control_read_allowed(opcode, parameters) || s1h_storage_inspection_allowed(opcode, parameters))) ||
+         (s1h_control_read_allowed(opcode, parameters) || s1h_storage_inspection_allowed(opcode, parameters) ||
+          s1h_battery_read_allowed(opcode, parameters))) ||
          (_interactiveEnabled && (expected == (opcode != 0x9404) && s1h_capture_request_allowed(opcode, parameters))) ||
          (_interactiveEnabled && !expected && s1h_vendor_session_allowed(opcode, parameters)));
     if (!_synchronized || !allowed) {
@@ -706,23 +764,18 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
     for (NSUInteger i = 0; i < parameters.count; ++i) write32(bytes + 12 + i * 4, parameters[i].unsignedIntValue);
     NSMutableData *outBuffer = nil;
     if (dataOut) {
-        NSMutableData *container = [NSMutableData dataWithLength:12 + dataOut.length];
-        unsigned char *containerBytes = container.mutableBytes;
-        write32(containerBytes, (uint32_t)container.length); write16(containerBytes + 4, 2);
-        write16(containerBytes + 6, opcode); write32(containerBytes + 8, transaction);
-        memcpy(containerBytes + 12, dataOut.bytes, dataOut.length);
-        outBuffer = container ? make_buffer(_interface, container.length, YES) : nil;
-        if (!outBuffer) { _error = @"Native PTP data allocation failed."; return nil; }
-        /* Copy actual payload bytes into a real DMA buffer. No pointer-to-
-         * array cast or upstream setter implementation is used. */
-        memcpy(outBuffer.mutableBytes, container.bytes, container.length);
+        outBuffer = make_buffer(_interface, 12 + dataOut.length, YES);
+        if (!write_data_container(outBuffer, dataOut, opcode, transaction)) {
+            _error = @"Could not encode the PTP data container into a native DMA buffer.";
+            return nil;
+        }
     }
     if (_verbose || opcode != 0x9706) printf("PTP request opcode=0x%04x tx=%u\n", opcode, transaction);
     _synchronized = NO;
     NSUInteger actual = 0;
     double remaining = _transactionDeadline - monotonic_seconds();
     if (remaining <= 0 || !transfer_timed(_output, command, "preview bulk OUT", &actual, NULL,
-            MIN(IO_TIMEOUT, remaining), MIN(IO_TIMEOUT + 0.5, remaining), NULL) || actual != command.length) {
+            MIN(IO_TIMEOUT, remaining), MIN(IO_TIMEOUT + 0.5, remaining), NULL, _verbose) || actual != command.length) {
         _error = @"Native bulk OUT failed or timed out; no further PTP command will be sent.";
         return nil;
     }
@@ -730,7 +783,7 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
         actual = 0;
         remaining = _transactionDeadline - monotonic_seconds();
         if (remaining <= 0 || !transfer_timed(_output, outBuffer, "PTP data OUT", &actual, NULL,
-                MIN(IO_TIMEOUT, remaining), MIN(IO_TIMEOUT + 0.5, remaining), NULL) || actual != outBuffer.length) {
+                MIN(IO_TIMEOUT, remaining), MIN(IO_TIMEOUT + 0.5, remaining), NULL, _verbose) || actual != outBuffer.length) {
             _error = @"PTP data OUT failed or timed out; the outcome is unknown.";
             return nil;
         }
@@ -782,12 +835,15 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
     double deadline = monotonic_seconds() + timeout;
     phase_deadline(timeout + 1.0);
     while (YES) {
+        if (StopRequested) return nil;
         if (_eventQueue.count) { NSDictionary *event = _eventQueue.firstObject; [_eventQueue removeObjectAtIndex:0]; return event; }
-        double remaining = deadline - monotonic_seconds();
-        if (StopRequested || remaining <= 0) {
-            if (_eventPending.length && error) *error = @"Interrupt event ended inside a container.";
+        double now = monotonic_seconds();
+        if (_eventFragmentDeadline && now >= _eventFragmentDeadline) {
+            if (error) *error = @"A fragmented capture event did not complete before its deadline.";
             return nil;
         }
+        double remaining = (_eventFragmentDeadline ? MIN(deadline, _eventFragmentDeadline) : deadline) - now;
+        if (remaining <= 0) return nil;
         if (!_eventRead) {
             PreviewInterruptRead *read = [PreviewInterruptRead new];
             read.buffer = make_buffer(_interface, 64, YES);
@@ -810,29 +866,19 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
             _eventRead = read;
         }
         PreviewInterruptRead *read = _eventRead;
-        if (dispatch_semaphore_wait(read.complete, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * NSEC_PER_SEC)))) {
-            if (_eventPending.length && error) *error = @"Interrupt event ended inside a container.";
-            return nil;
-        }
+        // A local poll can end before the interrupt has supplied a complete
+        // event. Keep both the in-flight read and the fragment across polls.
+        if (dispatch_semaphore_wait(read.complete, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(remaining * NSEC_PER_SEC)))) continue;
         _eventRead = nil;
-        if (read.result != kIOReturnSuccess || read.count > read.buffer.length) {
+        if (read.result != kIOReturnSuccess) {
             if (error) *error = @"Capture interrupt I/O did not complete successfully.";
             return nil;
         }
-        if (read.count) [_eventPending appendBytes:read.buffer.bytes length:read.count];
-        while (_eventPending.length >= 12) {
-            const unsigned char *bytes = _eventPending.bytes;
-            uint32_t length = read32(bytes);
-            if (length < 12 || length > 24 || (length - 12) % 4 || read16(bytes + 4) != 4) {
-                if (error) *error = @"Capture interrupt event has an invalid container header.";
-                return nil;
-            }
-            if (_eventPending.length < length) break;
-            NSMutableArray *parameters = [NSMutableArray array];
-            for (NSUInteger offset = 12; offset < length; offset += 4) [parameters addObject:@(read32(bytes + offset))];
-            [_eventQueue addObject:@{@"code":@(read16(bytes + 6)), @"transaction":@(read32(bytes + 8)), @"parameters":parameters}];
-            [_eventPending replaceBytesInRange:NSMakeRange(0, length) withBytes:NULL length:0];
-            if (_eventQueue.count > 32) { if (error) *error = @"Capture event queue exceeded its bound."; return nil; }
+        NSString *parseError = append_capture_events(_eventPending, _eventQueue, read.buffer, read.count,
+                                                     monotonic_seconds(), &_eventFragmentDeadline);
+        if (parseError) {
+            if (error) *error = parseError;
+            return nil;
         }
     }
 }
@@ -844,13 +890,11 @@ static NSString *parent_product(io_registry_entry_t entry, CFStringRef key) {
     [_interface destroy];
     _reader = nil; _input = nil; _output = nil; _events = nil; _eventRead = nil;
     _eventPending = nil; _eventQueue = nil; _interface = nil;
+    _eventFragmentDeadline = 0;
 }
 @end
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-function"
 #include "S1HNativeCapture.inc"
-#pragma clang diagnostic pop
 
 static BOOL skip_bytes(NSData *data, NSUInteger *offset, NSUInteger length) {
     if (*offset > data.length || length > data.length - *offset) return NO;
@@ -865,19 +909,72 @@ static NSString *ptp_string(NSData *data, NSUInteger *offset) {
     if (!skip_bytes(data, offset, count * 2) || read16(bytes + *offset - 2) != 0) return nil;
     return [[NSString alloc] initWithBytes:bytes + start length:(count - 1) * 2 encoding:NSUTF16LittleEndianStringEncoding];
 }
-static BOOL confirm_device_info(NSData *data) {
-    if (data.length < 8 || read32((const unsigned char *)data.bytes + 2) != 0x1c) return NO;
+static NSDictionary *parse_device_capabilities(NSData *data) {
+    const unsigned char *bytes = data.bytes;
+    if (data.length < 8 || read32(bytes + 2) != 0x1c) return nil;
     NSUInteger offset = 8;
-    if (!ptp_string(data, &offset) || !skip_bytes(data, &offset, 2)) return NO;
+    if (!ptp_string(data, &offset) || !skip_bytes(data, &offset, 2)) return nil;
+    NSArray<NSString *> *inventoryKeys = @[@"operations", @"events", @"properties"];
+    NSMutableDictionary *capabilities = [NSMutableDictionary dictionary];
     for (unsigned list = 0; list < 5; ++list) {
-        if (offset > data.length || data.length - offset < 4) return NO;
-        uint32_t count = read32((const unsigned char *)data.bytes + offset); offset += 4;
-        if (count > 4096 || !skip_bytes(data, &offset, (NSUInteger)count * 2)) return NO;
+        NSUInteger countOffset = offset;
+        if (!skip_bytes(data, &offset, 4)) return nil;
+        uint32_t count = read32(bytes + countOffset);
+        NSUInteger valuesOffset = offset;
+        if (count > 4096 || !skip_bytes(data, &offset, (NSUInteger)count * 2)) return nil;
+        if (list < inventoryKeys.count) {
+            NSMutableArray<NSNumber *> *codes = [NSMutableArray arrayWithCapacity:count];
+            for (uint32_t index = 0; index < count; ++index)
+                [codes addObject:@(read16(bytes + valuesOffset + (NSUInteger)index * 2))];
+            capabilities[inventoryKeys[list]] = codes;
+        }
     }
-    if (!ptp_string(data, &offset)) return NO; /* manufacturer; not logged */
+    if (!ptp_string(data, &offset)) return nil; /* manufacturer; not stored */
     NSString *model = ptp_string(data, &offset);
-    /* Stop here: device version and serial fields are not parsed or logged. */
-    return [model isEqualToString:@"DC-S1H"];
+    /* Never parse the device version or serial fields. */
+    if (![model isEqualToString:@"DC-S1H"]) return nil;
+    capabilities[@"model"] = model;
+    return capabilities;
+}
+
+static BOOL s1h_is_percent_battery_descriptor(NSData *data) {
+    // ISO 15740 §13.5.1 permits a device-defined UINT8 scale. Display a
+    // percentage only when the descriptor explicitly spans 0 to 100.
+    if (data.length < 8) return NO;
+    const unsigned char *bytes = data.bytes;
+    if (read16(bytes) != S1HBatteryProperty || read16(bytes + 2) != 0x0002 ||
+        bytes[4] != 0 || bytes[5] > 100 || bytes[6] > 100) return NO;
+    if (bytes[7] == 1)
+        return data.length == 11 && bytes[8] == 0 && bytes[9] == 100 && bytes[10] > 0 && bytes[10] <= 100;
+    if (bytes[7] != 2 || data.length < 10) return NO;
+    uint16_t count = read16(bytes + 8);
+    if (count < 2 || count > 101 || data.length != (NSUInteger)count + 10) return NO;
+    BOOL present[101] = {NO};
+    for (uint16_t index = 0; index < count; ++index) {
+        unsigned char value = bytes[10 + index];
+        if (value > 100 || present[value]) return NO;
+        present[value] = YES;
+    }
+    return present[0] && present[100];
+}
+
+static NSNumber *s1h_read_battery_percent(NativePreviewTransport *transport, NSDictionary *capabilities) {
+    NSArray *operations = capabilities[@"operations"];
+    if (StopRequested || !transport.synchronized ||
+        ![operations containsObject:@(S1HBatteryDescriptorOpcode)] || ![operations containsObject:@(S1HBatteryValueOpcode)] ||
+        ![capabilities[@"properties"] containsObject:@(S1HBatteryProperty)]) return nil;
+    NSArray<NSNumber *> *parameters = @[@(S1HBatteryProperty)];
+    double previousBudget = transport.transactionBudget;
+    transport.transactionBudget = 1.0;
+    PreviewReply *descriptor = [transport request:S1HBatteryDescriptorOpcode parameters:parameters dataExpected:YES];
+    PreviewReply *value = nil;
+    if (descriptor.code == 0x2001 && s1h_is_percent_battery_descriptor(descriptor.data) &&
+        transport.synchronized && !StopRequested)
+        value = [transport request:S1HBatteryValueOpcode parameters:parameters dataExpected:YES];
+    transport.transactionBudget = previousBudget;
+    if (value.code != 0x2001 || value.data.length != 1) return nil;
+    const unsigned char *bytes = value.data.bytes;
+    return bytes[0] <= 100 ? @(bytes[0]) : nil;
 }
 
 static NSArray<NSDictionary *> *read_available_formats(NativePreviewTransport *transport, NSString **error) {
@@ -1000,12 +1097,16 @@ static BOOL has_logical_capture_storage(NSArray<NSNumber *> *ids) {
     return NO;
 }
 
-static BOOL set_capture_target(NativePreviewTransport *transport, NSNumber *target) {
+static NSData *capture_target_data(NSNumber *target) {
     unsigned char bytes[10];
     write32(bytes, 0x08000091);
     write32(bytes + 4, 2);
     write16(bytes + 8, target.unsignedShortValue);
-    NSData *data = [NSData dataWithBytes:bytes length:sizeof bytes];
+    return [NSData dataWithBytes:bytes length:sizeof bytes];
+}
+
+static BOOL set_capture_target(NativePreviewTransport *transport, NSNumber *target) {
+    NSData *data = capture_target_data(target);
     PreviewReply *reply = [transport request:0x940b parameters:@[@0x08000091] dataExpected:NO dataOut:data];
     if (reply.code == 0x201d && !StopRequested)
         reply = [transport request:0x940b parameters:@[@0] dataExpected:NO dataOut:data];
@@ -1014,6 +1115,7 @@ static BOOL set_capture_target(NativePreviewTransport *transport, NSNumber *targ
 
 static NSDictionary *inspect_capture_storage(NativePreviewTransport *transport) {
     NSMutableDictionary *storage = [NSMutableDictionary dictionary];
+    if (!transport.synchronized || StopRequested) return storage;
     PreviewReply *target = [transport request:0x940a parameters:@[@0x08000090] dataExpected:YES];
     if (target) storage[@"target_response"] = @(target.code);
     if (target.code == 0x2001) {
@@ -1028,9 +1130,42 @@ static NSDictionary *inspect_capture_storage(NativePreviewTransport *transport) 
         if (handles) {
             storage[@"storage_count"] = @(handles.count);
             storage[@"storage_ids"] = handles;
+            storage[@"logical_card_available"] = @(has_logical_capture_storage(handles));
         }
     }
     return storage;
+}
+
+static NSDictionary *change_body_capture_target(NativePreviewTransport *transport, NSNumber *target,
+                                               NSDictionary **storage) {
+    NSDictionary *before = inspect_capture_storage(transport);
+    *storage = before;
+    NSNumber *current = before[@"target"];
+    if (!current || StopRequested || !transport.synchronized)
+        return @{@"status":@"rejected", @"message":@"Could not confirm the camera's current storage target."};
+    if (![target isEqual:@1] && ![before[@"logical_card_available"] boolValue])
+        return @{@"status":@"rejected", @"message":@"The camera did not report an active memory card."};
+    if ([current isEqual:target])
+        return @{@"status":@"ok", @"message":@"The camera storage target already matches the selection."};
+
+    // The explicit setting never retries the write. Show only a read-back
+    // confirmation even if the camera's write response was successful.
+    PreviewReply *reply = [transport request:0x940b parameters:@[@0x08000091]
+                                 dataExpected:NO dataOut:capture_target_data(target)];
+    NSMutableDictionary *after = [before mutableCopy];
+    [after removeObjectForKey:@"target"];
+    [after removeObjectForKey:@"target_response"];
+    *storage = after;
+    NSNumber *observed = reply && transport.synchronized && !StopRequested ? read_capture_target(transport) : nil;
+    if (!observed)
+        return @{@"status":@"outcome_unknown", @"message":@"The camera storage target could not be confirmed after the write."};
+    after[@"target"] = observed;
+    after[@"target_response"] = @0x2001;
+    if (reply.code != 0x2001)
+        return @{@"status":@"error", @"message":[NSString stringWithFormat:@"Camera declined the storage target with response 0x%04X.", reply.code]};
+    if (![observed isEqual:target])
+        return @{@"status":@"error", @"message":@"The camera reported a different storage target after the write."};
+    return @{@"status":@"ok", @"message":@"Camera storage target changed and verified."};
 }
 
 /* Only this worker thread reads requests or touches the PTP session. */
@@ -1090,17 +1225,27 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
     BOOL set = [kind isEqualToString:@"set"];
     BOOL refresh = [kind isEqualToString:@"refresh"];
     BOOL setDirectory = [kind isEqualToString:@"set_camera_save_dir"];
+    BOOL setPrefix = [kind isEqualToString:@"set_photo_name_prefix"];
+    BOOL setBodyTarget = [kind isEqualToString:@"set_body_capture_target"];
+    BOOL focus = [kind isEqualToString:@"focus_step"];
+    NSNumber *bodyTarget = setBodyTarget && [target isKindOfClass:NSString.class] ?
+        @{@"card":@0, @"mac":@1, @"card_and_mac":@2}[target] : nil;
+    NSString *prefix = [action[@"prefix"] isKindOfClass:NSString.class] ? action[@"prefix"] : nil;
     if ((capture && (!status.captureAvailable || !directory.isAbsolutePath ||
                      ![@[@"current", @"mac", @"card_and_mac"] containsObject:target])) ||
         (set && (!property || !value || CFGetTypeID((__bridge CFTypeRef)value) == CFBooleanGetTypeID())) ||
-        (setDirectory && !directory.isAbsolutePath) || (!capture && !set && !refresh && !setDirectory)) {
+        (setDirectory && !directory.isAbsolutePath) || (setPrefix && !s1h_photo_prefix_valid(prefix)) ||
+        (setBodyTarget && !bodyTarget) || (focus && ![@[@"a", @"b"] containsObject:action[@"direction"] ?: NSNull.null]) ||
+        (!capture && !set && !refresh && !setDirectory && !setPrefix && !setBodyTarget && !focus)) {
         BOOL published = publish_action(status, actionID,
-            @{@"status": @"rejected", @"message": @"The requested action or photo directory is unavailable."});
+            @{@"status": @"rejected", @"message": @"The requested action, photo directory or name prefix is unavailable."});
         return published ? nil : status.writeError;
     }
 
     status.captureAvailable = NO;
-    if (!publish_action(status, actionID, @{@"status": @"busy", @"message": @"Preparing camera action."})) return status.writeError;
+    NSDictionary *preparing = capture ? s1h_capture_busy(@"preparing", @"Preparing camera action.") :
+        @{@"status": @"busy", @"message": @"Preparing camera action."};
+    if (!publish_action(status, actionID, preparing)) return status.writeError;
     NSDictionary *result;
     if (capture) {
         NSNumber *requestedTarget = @{@"mac": @1, @"card_and_mac": @2}[target];
@@ -1124,12 +1269,12 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
             } else {
                 /* Quiesce preview requests during still capture. Keep the
                  * camera's live mode enabled for the shutter command. */
-                result = s1h_capture_once(transport, directory, ^(NSString *message) {
-                    if (!publish_action(status, actionID, @{@"status": @"busy", @"message": message})) StopRequested = 1;
+                result = s1h_capture_once(transport, directory, options.photoNamePrefix, ^(NSDictionary *update) {
+                    if (!publish_action(status, actionID, update)) StopRequested = 1;
                 });
             }
         }
-        status.requiresReview = [result[@"capture_issued"] boolValue] && ![result[@"safe_to_resume"] boolValue];
+        status.requiresReview = ![result[@"safe_to_resume"] boolValue];
         if (targetChange) {
             NSNumber *current = !status.requiresReview && !StopRequested && transport.synchronized ? read_capture_target(transport) : nil;
             BOOL restored = current && ([current isEqual:originalTarget] || set_capture_target(transport, originalTarget));
@@ -1142,9 +1287,28 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
             }
             result = withTarget;
         }
+    } else if (focus) {
+        result = s1h_focus_jog(transport, action[@"direction"]);
+        if ([result[@"status"] isEqual:@"outcome_unknown"]) status.requiresReview = YES;
     } else if (setDirectory) {
         options.cameraSaveDirectory = directory;
         result = @{@"status": @"ok", @"message": @"Camera photo save folder updated."};
+    } else if (setPrefix) {
+        options.photoNamePrefix = prefix;
+        result = @{@"status": @"ok", @"message": @"Photo filename prefix updated."};
+    } else if (setBodyTarget) {
+        NSString *directoryError = nil;
+        BOOL needsMacFolder = ![bodyTarget isEqual:@0];
+        int saveDirectoryFD = needsMacFolder ? s1h_capture_directory(options.cameraSaveDirectory, NULL, &directoryError) : -1;
+        if (saveDirectoryFD >= 0) close(saveDirectoryFD);
+        if (needsMacFolder && saveDirectoryFD < 0) {
+            result = @{@"status":@"rejected", @"message":directoryError ?: @"The photo save folder is unavailable."};
+        } else {
+            NSDictionary *observedStorage = nil;
+            result = change_body_capture_target(transport, bodyTarget, &observedStorage);
+            status.captureStorage = observedStorage;
+            if ([result[@"status"] isEqual:@"outcome_unknown"]) status.requiresReview = YES;
+        }
     } else if (set) {
         NSDictionary *updatedControls = nil;
         result = s1h_control_set(transport, property, value, &updatedControls);
@@ -1153,6 +1317,8 @@ static NSString *perform_interactive_action(NSDictionary *action, PreviewStatus 
         status.controls = controls;
     } else {
         status.controls = s1h_controls_refresh(transport);
+        status.captureStorage = inspect_capture_storage(transport);
+        status.batteryPercent = s1h_read_battery_percent(transport, status.deviceCapabilities);
         result = transport.synchronized ? @{@"status": @"ok", @"message": @"Camera settings refreshed."} :
             @{@"status": @"error", @"message": @"The camera settings could not be read completely."};
     }
@@ -1170,19 +1336,23 @@ static BOOL publish_camera_transfer(PreviewStatus *status, NSString *identifier,
     return [status update:@"previewing" message:@"Native USB preview is running."];
 }
 
-static NSString *poll_camera_transfer(PreviewStatus *status, NativePreviewTransport *transport, NSString *directory) {
+static NSString *poll_camera_transfer(PreviewStatus *status, NativePreviewTransport *transport, PreviewOptions *options) {
+    NSString *directory = options.cameraSaveDirectory;
     if (!directory || StopRequested) return nil;
     NSString *eventError = nil;
     NSDictionary *event = [transport readCaptureEvent:0.002 error:&eventError];
     if (eventError) return eventError;
     if (!s1h_camera_event_starts_transfer(event)) return nil;
+    // A card object already has its chosen destination. Still recover any
+    // reported SDRAM object, which may have no other copy.
+    if ([status.captureStorage[@"target"] isEqual:@0] && [event[@"code"] isEqual:@0xc108]) return nil;
 
     NSString *identifier = NSUUID.UUID.UUIDString;
     status.captureAvailable = NO;
-    if (!publish_camera_transfer(status, identifier, directory, @{@"status": @"busy", @"message": @"Receiving photo from camera shutter."}))
+    if (!publish_camera_transfer(status, identifier, directory, s1h_capture_busy(@"preparing", @"Receiving photo from camera shutter.")))
         return status.writeError;
-    NSDictionary *result = s1h_capture_from_camera_event(transport, directory, event, ^(NSString *message) {
-        if (!publish_camera_transfer(status, identifier, directory, @{@"status": @"busy", @"message": message})) StopRequested = 1;
+    NSDictionary *result = s1h_capture_from_camera_event(transport, directory, options.photoNamePrefix, event, ^(NSDictionary *update) {
+        if (!publish_camera_transfer(status, identifier, directory, update)) StopRequested = 1;
     });
     status.requiresReview = ![result[@"safe_to_resume"] boolValue];
     if (!publish_camera_transfer(status, identifier, directory, result)) return status.writeError;
@@ -1227,6 +1397,7 @@ static int run_preview(PreviewOptions *options) {
     [status update:@"connecting" message:@"Connecting to DC-S1H."];
     if (![transport openInterface]) failure = transport.error;
     if (!failure) {
+        status.usbLinkSpeed = transport.usbLinkSpeed;
         [status update:@"draining" message:@"Preparing the camera connection."];
         if (![transport drain]) failure = transport.error;
     }
@@ -1235,7 +1406,7 @@ static int run_preview(PreviewOptions *options) {
         status.staleSession = reply.code == 0x201e;
         if (status.staleSession && options.closeStaleSession && !StopRequested) {
             PreviewReply *device = [transport request:0x1001 parameters:@[] dataExpected:YES];
-            if (device.code == 0x2001 && confirm_device_info(device.data) && !StopRequested) {
+            if (device.code == 0x2001 && parse_device_capabilities(device.data) && !StopRequested) {
                 PreviewReply *closed = [transport request:0x1003 parameters:@[] dataExpected:NO];
                 if (closed.code == 0x2001 && !StopRequested) {
                     transport.nextTransaction = 0;
@@ -1250,7 +1421,8 @@ static int run_preview(PreviewOptions *options) {
     }
     if (!failure && !StopRequested) {
         PreviewReply *reply = [transport request:0x1001 parameters:@[] dataExpected:YES];
-        if (!reply || reply.code != 0x2001 || !confirm_device_info(reply.data))
+        status.deviceCapabilities = reply.code == 0x2001 ? parse_device_capabilities(reply.data) : nil;
+        if (!status.deviceCapabilities)
             failure = transport.error ?: @"DeviceInfo did not confirm a Panasonic DC-S1H.";
         else [status update:@"session_open" message:@"Connected to Panasonic DC-S1H."];
     }
@@ -1272,8 +1444,8 @@ static int run_preview(PreviewOptions *options) {
         if (!transport.synchronized) failure = transport.error ?: @"Control inspection lost its complete transaction boundary.";
         [status update:@"session_open" message:failure ?: @"Camera control inspection completed."];
     }
-    if (!failure && !StopRequested && options.inspectControls) {
-        if (options.explicitStorageTarget) {
+    if (!failure && !StopRequested && (options.inspectControls || options.interactive)) {
+        if (options.inspectControls && options.explicitStorageTarget) {
             NSNumber *before = read_capture_target(transport);
             if (!before || (![before isEqual:options.explicitStorageTarget] &&
                             !set_capture_target(transport, options.explicitStorageTarget)))
@@ -1281,6 +1453,12 @@ static int run_preview(PreviewOptions *options) {
         }
         status.captureStorage = inspect_capture_storage(transport);
         if (!transport.synchronized) failure = transport.error ?: @"Capture storage inspection was interrupted.";
+        // The GUI runs the optional battery probe only on an explicit Refresh.
+        // A transport failure here must not repeat on every automatic reconnect.
+        if (!failure && !StopRequested && options.inspectControls) {
+            status.batteryPercent = s1h_read_battery_percent(transport, status.deviceCapabilities);
+            if (!transport.synchronized) failure = transport.error ?: @"Battery telemetry inspection was interrupted.";
+        }
     }
     if (!failure && !StopRequested && formatRequested) {
         NSArray *formats = read_available_formats(transport, &failure);
@@ -1333,7 +1511,7 @@ static int run_preview(PreviewOptions *options) {
            (options.duration <= 0 || monotonic_seconds() - status.previewStart < options.duration)) {
         @autoreleasepool {
             double frameStart = monotonic_seconds();
-            if (options.interactive) failure = poll_camera_transfer(status, transport, options.cameraSaveDirectory);
+            if (options.interactive) failure = poll_camera_transfer(status, transport, options);
             if (failure || StopRequested) break;
             if (options.interactive && status.frames) {
                 NSDictionary *action = next_interactive_action(actionInput, &actionInputEnded, &failure);
@@ -1347,7 +1525,7 @@ static int run_preview(PreviewOptions *options) {
                 reply = [transport request:0x9706 parameters:@[] dataExpected:YES];
                 if (!reply || reply.code != 0x2019) break;
                 if (options.cameraSaveDirectory) {
-                    failure = poll_camera_transfer(status, transport, options.cameraSaveDirectory);
+                    failure = poll_camera_transfer(status, transport, options);
                     if (failure || monotonic_seconds() >= busyDeadline) break;
                 } else if (++busy >= 25) break;
                 bounded_pause(0.04);
@@ -1430,6 +1608,107 @@ static void append_ptp_string(NSMutableData *data, NSString *value) {
     unsigned char count = (unsigned char)(utf.length / 2 + 1); [data appendBytes:&count length:1];
     [data appendData:utf]; append16(data, 0);
 }
+static BOOL body_capture_target_self_test(void) {
+    NSMutableData *physicalSlots = [NSMutableData data];
+    append32(physicalSlots, 1); append32(physicalSlots, 0x00010000);
+    NSMutableData *withCard = [NSMutableData data];
+    append32(withCard, 1); append32(withCard, 0x00010001);
+    PreviewReply *noCard = s1h_control_fixture_reply(0x2001, physicalSlots);
+    PreviewReply *card = s1h_control_fixture_reply(0x2001, withCard);
+    PreviewReply *cardTarget = s1h_control_fixture_reply(0x2001, capture_target_data(@0));
+    PreviewReply *macTarget = s1h_control_fixture_reply(0x2001, capture_target_data(@1));
+    PreviewReply *bothTarget = s1h_control_fixture_reply(0x2001, capture_target_data(@2));
+    PreviewReply *acknowledged = s1h_control_fixture_reply(0x2001, nil);
+    PreviewReply *declined = s1h_control_fixture_reply(0x201d, nil);
+    NSArray *readTarget = @[@0x940a, @[@0x08000090], @YES, NSNull.null];
+    NSArray *readStorage = @[@0x1004, @[], @YES, NSNull.null];
+    S1HControlFixtureTransport *transport = [S1HControlFixtureTransport new];
+    transport.fixtureRequests = [NSMutableArray array];
+    transport.synchronized = YES;
+    NSDictionary *storage = nil;
+    BOOL ok = YES;
+    for (NSNumber *target in @[@0, @2]) {
+        transport.fixtureReplies = @[macTarget, noCard];
+        NSDictionary *rejected = change_body_capture_target(transport, target, &storage);
+        ok = ok && [rejected[@"status"] isEqual:@"rejected"] && [storage[@"target"] isEqual:@1] &&
+            [storage[@"logical_card_available"] isEqual:@NO] &&
+            [transport.fixtureRequests isEqual:@[readTarget, readStorage]];
+        [transport.fixtureRequests removeAllObjects];
+    }
+
+    transport.fixtureReplies = @[macTarget, card, acknowledged, cardTarget];
+    NSDictionary *saved = change_body_capture_target(transport, @0, &storage);
+    NSArray *writeCard = @[@0x940b, @[@0x08000091], @NO, capture_target_data(@0)];
+    ok = ok && [saved[@"status"] isEqual:@"ok"] && [storage[@"target"] isEqual:@0] &&
+        [storage[@"logical_card_available"] isEqual:@YES] &&
+        [transport.fixtureRequests isEqual:@[readTarget, readStorage, writeCard, readTarget]] &&
+        s1h_capture_target_data_allowed(0x940b, writeCard[1], writeCard[3]);
+    [transport.fixtureRequests removeAllObjects];
+
+    transport.fixtureReplies = @[bothTarget, noCard, acknowledged, macTarget];
+    saved = change_body_capture_target(transport, @1, &storage);
+    NSArray *writeMac = @[@0x940b, @[@0x08000091], @NO, capture_target_data(@1)];
+    ok = ok && [saved[@"status"] isEqual:@"ok"] && [storage[@"target"] isEqual:@1] &&
+        [transport.fixtureRequests isEqual:@[readTarget, readStorage, writeMac, readTarget]];
+    [transport.fixtureRequests removeAllObjects];
+
+    NSArray *writeBoth = @[@0x940b, @[@0x08000091], @NO, capture_target_data(@2)];
+    for (PreviewReply *writeReply in @[acknowledged, declined]) {
+        transport.fixtureReplies = @[macTarget, card, writeReply, macTarget];
+        NSDictionary *failure = change_body_capture_target(transport, @2, &storage);
+        ok = ok && [failure[@"status"] isEqual:@"error"] && [storage[@"target"] isEqual:@1] &&
+            [transport.fixtureRequests isEqual:@[readTarget, readStorage, writeBoth, readTarget]];
+        [transport.fixtureRequests removeAllObjects];
+    }
+
+    transport.fixtureReplies = @[macTarget, card, NSNull.null];
+    NSDictionary *unknown = change_body_capture_target(transport, @2, &storage);
+    return ok && [unknown[@"status"] isEqual:@"outcome_unknown"] && !storage[@"target"] &&
+        [transport.fixtureRequests isEqual:@[readTarget, readStorage, writeBoth]];
+}
+
+static BOOL battery_telemetry_self_test(void) {
+    const unsigned char rangeBytes[] = {0x01, 0x50, 2, 0, 0, 100, 62, 1, 0, 100, 10};
+    NSData *range = [NSData dataWithBytes:rangeBytes length:sizeof rangeBytes];
+    const unsigned char enumBytes[] = {0x01, 0x50, 2, 0, 0, 100, 62, 2, 3, 0, 0, 50, 100};
+    NSData *enumeration = [NSData dataWithBytes:enumBytes length:sizeof enumBytes];
+    NSMutableData *foreignScale = [range mutableCopy];
+    ((unsigned char *)foreignScale.mutableBytes)[9] = 5;
+    NSDictionary *capabilities = @{@"operations":@[@0x1014, @0x1015], @"properties":@[@0x5001]};
+    NSArray *descriptorRequest = @[@0x1014, @[@0x5001], @YES, NSNull.null];
+    NSArray *valueRequest = @[@0x1015, @[@0x5001], @YES, NSNull.null];
+    S1HControlFixtureTransport *transport = [S1HControlFixtureTransport new];
+    transport.synchronized = YES;
+    transport.transactionBudget = 3.5;
+    transport.fixtureRequests = [NSMutableArray array];
+    BOOL ok = s1h_is_percent_battery_descriptor(range) && s1h_is_percent_battery_descriptor(enumeration) &&
+        !s1h_is_percent_battery_descriptor(foreignScale) &&
+        !s1h_is_percent_battery_descriptor([enumeration subdataWithRange:NSMakeRange(0, enumeration.length - 1)]) &&
+        !s1h_read_battery_percent(transport, @{@"operations":@[@0x1014], @"properties":@[@0x5001]}) &&
+        transport.fixtureRequests.count == 0;
+
+    PreviewReply *descriptor = s1h_control_fixture_reply(0x2001, range);
+    const unsigned char values[] = {0, 62, 100, 101};
+    for (NSUInteger index = 0; index < sizeof values; ++index) {
+        NSData *value = [NSData dataWithBytes:&values[index] length:1];
+        transport.fixtureReplies = @[descriptor, s1h_control_fixture_reply(0x2001, value)];
+        NSNumber *observed = s1h_read_battery_percent(transport, capabilities);
+        ok = ok && (values[index] <= 100 ? [observed isEqual:@(values[index])] : observed == nil) &&
+            [transport.fixtureRequests isEqual:@[descriptorRequest, valueRequest]] && transport.transactionBudget == 3.5;
+        [transport.fixtureRequests removeAllObjects];
+    }
+    transport.fixtureReplies = @[s1h_control_fixture_reply(0x2005, nil)];
+    ok = ok && !s1h_read_battery_percent(transport, capabilities) && transport.synchronized &&
+        [transport.fixtureRequests isEqual:@[descriptorRequest]];
+    [transport.fixtureRequests removeAllObjects];
+    transport.fixtureReplies = @[descriptor, s1h_control_fixture_reply(0x2001, range)];
+    return ok && !s1h_read_battery_percent(transport, capabilities) &&
+        [transport.fixtureRequests isEqual:@[descriptorRequest, valueRequest]] && transport.synchronized &&
+        s1h_battery_read_allowed(0x1014, @[@0x5001]) && s1h_battery_read_allowed(0x1015, @[@0x5001]) &&
+        !s1h_battery_read_allowed(0x1015, @[@0x5002]) && !s1h_battery_read_allowed(0x1016, @[@0x5001]) &&
+        !s1h_battery_read_allowed(0x1014, @[@0x5001, @0]);
+}
+
 static int self_test(void) {
     unsigned failures = 0, checks = 0;
 #define CHECK(condition, label) do { ++checks; BOOL passed = (condition); if (!passed) ++failures; printf("%s %s\n", passed ? "PASS" : "FAIL", label); } while (0)
@@ -1449,6 +1728,8 @@ static int self_test(void) {
     CHECK(opcode_allowed(0x9412, @[@0x0d000010]) && opcode_allowed(0x9706, @[]), "Preview-only opcodes are allowed");
     CHECK(!opcode_allowed(0x9404, @[]) && !opcode_allowed(0x9403, @[]) && !opcode_allowed(0x940c, @[]), "Shutter, property writes, and recording opcodes are rejected");
     CHECK(!opcode_allowed(0x9412, @[@0x12345678]) && !opcode_allowed(0x1002, @[@2]), "Unexpected control/session parameters are rejected");
+    CHECK(body_capture_target_self_test(), "Body shutter storage changes enforce card readiness, exactly one write and verified read-back");
+    CHECK(battery_telemetry_self_test(), "Battery telemetry uses only advertised reads and confirmed 0-100 UINT8 data");
     NSDictionary *small = @{@"width": @640, @"height": @480, @"x_raw": @32, @"frequency_raw": @30};
     NSDictionary *original = @{@"width": @640, @"height": @480, @"x_raw": @0, @"frequency_raw": @30};
     NSDictionary *large = @{@"width": @1600, @"height": @1200, @"x_raw": @700, @"frequency_raw": @15};
@@ -1485,6 +1766,7 @@ static int self_test(void) {
     CHECK(!keep_preview_format_valid(NO, @"max") && !keep_preview_format_valid(NO, @"0") &&
           !keep_preview_format_valid(NO, nil), "Every explicit selection requires retention acknowledgement before any I/O");
     CHECK(s1h_controls_self_test(), "Control protocol fixtures pass without hardware");
+    CHECK(s1h_focus_self_test(), "Remote focus validates MF, bounded motor movement and the paired stop command");
     CHECK(s1h_capture_self_test(), "Capture protocol fixtures pass without hardware");
     CHECK(s1h_capture_request_allowed(0x9404, @[@0x03000011]) && !s1h_capture_request_allowed(0x9404, @[@0x03000012]) &&
           s1h_capture_request_allowed(0x101b, @[@1,@0,@1048576]) && !s1h_capture_request_allowed(0x101b, @[@1,@0,@1048577]),
@@ -1517,12 +1799,15 @@ static int self_test(void) {
     CHECK(same_preview_format(select_preview_format(@[small, huge, huge], @"max", NULL), huge) &&
           select_preview_format(@[small, original], @"max", NULL) == small,
           "Maximum format uses wide area arithmetic and stable first-entry ties");
-    NSData *dataContainer = pack_format_data_container(originalPayload, 42);
+    NSMutableData *dataContainer = [NSMutableData dataWithLength:28];
+    BOOL encoded = write_data_container(dataContainer, originalPayload, 0x9415, 42);
     const unsigned char *containerBytes = dataContainer.bytes;
-    CHECK(dataContainer.length == 28 && read32(containerBytes) == 28 && read16(containerBytes + 4) == 2 &&
+    CHECK(encoded && read32(containerBytes) == 28 && read16(containerBytes + 4) == 2 &&
           read16(containerBytes + 6) == 0x9415 && read32(containerBytes + 8) == 42 &&
           !memcmp(containerBytes + 12, expectedPayload, sizeof expectedPayload),
           "Format DataOut has type two, opcode 9415, matching transaction and real payload bytes");
+    CHECK(!write_data_container([NSMutableData dataWithLength:27], originalPayload, 0x9415, 42),
+          "Production DataOut encoder refuses a buffer with the wrong size");
     CHECK(format_data_allowed(0x9415, @[@0x0d800011], originalPayload) &&
           !format_data_allowed(0x9403, @[@0x0d800011], originalPayload) &&
           !format_data_allowed(0x9415, @[@0x0d800012], originalPayload) &&
@@ -1530,16 +1815,68 @@ static int self_test(void) {
           !opcode_allowed(0x9415, @[@0x0d800011]), "Only the known preview-format payload can use the dedicated DataOut path");
     NSMutableData *info = [NSMutableData data]; append16(info, 100); append32(info, 0x1c); append16(info, 100);
     append_ptp_string(info, @""); append16(info, 0);
-    for (unsigned i = 0; i < 5; ++i) append32(info, 0);
-    append_ptp_string(info, @"Panasonic"); append_ptp_string(info, @"DC-S1H");
-    CHECK(confirm_device_info(info), "DeviceInfo confirms exact model without parsing serial fields");
-    CHECK(!confirm_device_info([info subdataWithRange:NSMakeRange(0, 9)]), "Truncated DeviceInfo is rejected");
+    NSUInteger firstList = info.length;
+    append32(info, 2); append16(info, 0x1001); append16(info, 0x9402);
+    append32(info, 1); append16(info, 0xc109);
+    append32(info, 1); append16(info, 0x5001);
+    append32(info, 1); append16(info, 0x3801);
+    append32(info, 1); append16(info, 0x3801);
+    append_ptp_string(info, @"Panasonic");
+    NSUInteger modelOffset = info.length;
+    append_ptp_string(info, @"DC-S1H");
+    NSDictionary *expectedCapabilities = @{@"model":@"DC-S1H", @"operations":@[@0x1001, @0x9402],
+        @"events":@[@0xc109], @"properties":@[@0x5001]};
+    CHECK([parse_device_capabilities(info) isEqual:expectedCapabilities],
+        "DeviceInfo confirms the model and returns the advertised capability lists");
+    append_ptp_string(info, @"Firmware fixture"); append_ptp_string(info, @"Serial fixture");
+    CHECK([parse_device_capabilities(info) isEqual:expectedCapabilities],
+        "DeviceInfo inventory excludes manufacturer, format lists, firmware and serial fields");
+    CHECK(!parse_device_capabilities([info subdataWithRange:NSMakeRange(0, firstList + 5)]),
+        "Truncated DeviceInfo capability array is rejected");
+    NSMutableData *invalidInfo = [info mutableCopy];
+    write32((unsigned char *)invalidInfo.mutableBytes + firstList, UINT32_MAX);
+    CHECK(!parse_device_capabilities(invalidInfo), "Oversized DeviceInfo capability array is rejected");
+    invalidInfo = [[info subdataWithRange:NSMakeRange(0, modelOffset)] mutableCopy];
+    append_ptp_string(invalidInfo, @"DC-S1");
+    CHECK(!parse_device_capabilities(invalidInfo), "DeviceInfo still rejects other camera models");
     NSMutableData *packet = [NSMutableData data]; append32(packet, 16); append16(packet, 3); append16(packet, 0x2001); append32(packet, 9); append32(packet, 42);
     __block NSUInteger part = 0;
     NSArray *parts = @[[packet subdataWithRange:NSMakeRange(0, 3)], [packet subdataWithRange:NSMakeRange(3, 7)], [packet subdataWithRange:NSMakeRange(10, 6)]];
     PreviewReader *reader = [PreviewReader new]; reader.readChunk = ^NSData *{ return part < parts.count ? parts[part++] : nil; };
     PreviewContainer *parsed = [reader container];
     CHECK(parsed && parsed.transaction == 9 && parsed.code == 0x2001 && parsed.payload.length == 4, "PTP framing spans fragmented USB chunks");
+    NSMutableData *eventPacket = [NSMutableData data];
+    append32(eventPacket, 16); append16(eventPacket, 4); append16(eventPacket, 0xc109);
+    append32(eventPacket, UINT32_MAX); append32(eventPacket, 42);
+    NativePreviewTransport *eventTransport = [NativePreviewTransport new];
+    eventTransport.interactiveEnabled = YES;
+    eventTransport.synchronized = YES;
+    // Bypass USB submission with an already queued, unsignalled test read.
+    eventTransport.events = (IOUSBHostPipe *)[NSObject new];
+    eventTransport.eventPending = [NSMutableData data];
+    eventTransport.eventQueue = [NSMutableArray array];
+    PreviewInterruptRead *eventRead = [PreviewInterruptRead new];
+    eventRead.complete = dispatch_semaphore_create(0);
+    eventTransport.eventRead = eventRead;
+    NSString *eventError = nil;
+    double fragmentDeadline = 0;
+    NSString *fragmentError = append_capture_events(eventTransport.eventPending, eventTransport.eventQueue,
+        eventPacket, 5, monotonic_seconds(), &fragmentDeadline);
+    eventTransport.eventFragmentDeadline = fragmentDeadline;
+    CHECK(!fragmentError && ![eventTransport readCaptureEvent:0.002 error:&eventError] && !eventError &&
+          eventTransport.eventPending.length == 5 && eventTransport.eventRead == eventRead,
+          "Short interrupt polls preserve partial capture events and their pending read");
+    eventRead.buffer = [[eventPacket subdataWithRange:NSMakeRange(5, 11)] mutableCopy];
+    eventRead.result = kIOReturnSuccess;
+    eventRead.count = eventRead.buffer.length;
+    dispatch_semaphore_signal(eventRead.complete);
+    NSDictionary *receivedEvent = [eventTransport readCaptureEvent:0.002 error:&eventError];
+    CHECK(!eventError && [receivedEvent[@"code"] isEqual:@0xc109] && [receivedEvent[@"parameters"] isEqual:@[@42]] &&
+          !eventTransport.eventPending.length && !eventTransport.eventFragmentDeadline,
+          "A subsequent USB completion joins and delivers exactly one capture event");
+    eventTransport.eventFragmentDeadline = monotonic_seconds() - 1.0;
+    CHECK(![eventTransport readCaptureEvent:0.002 error:&eventError] && eventError.length,
+          "Incomplete capture events fail after their independent deadline");
     unsigned char pixels[12] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255};
     CGColorSpaceRef colors = CGColorSpaceCreateDeviceRGB();
     CGContextRef context = CGBitmapContextCreate(pixels, 3, 1, 8, 12, colors, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
@@ -1563,7 +1900,7 @@ static int self_test(void) {
 static void usage(const char *program) {
     printf("Usage: %s --output-dir PATH [--frames N] [--duration SECONDS] [--fps N] [--preview-format auto|max|INDEX] [--keep-preview-format] [--parent-pid PID] [--verbose]\n", program);
     printf("       %s --inspect-controls --output-dir PATH\n", program);
-    printf("       %s --interactive --output-dir PATH [--camera-save-dir ABSOLUTE_FOLDER] [preview options]\n", program);
+    printf("       %s --interactive --output-dir PATH [--camera-save-dir ABSOLUTE_FOLDER] [--photo-name-prefix PREFIX] [preview options]\n", program);
     printf("       %s --self-test | --help\n", program);
     printf("Default: 60 preview frames at up to 10 fps. Duration without --frames runs until that duration.\n");
     printf("Frame-rate range: 0.1 to 60 fps.\n");
@@ -1572,6 +1909,7 @@ static void usage(const char *program) {
     printf("--inspect-controls reads actual descriptors/current values into status.json, then closes without starting preview or changing camera settings.\n");
     printf("--close-stale-session with --inspect-controls or --interactive explicitly closes a verified leftover session after SessionAlreadyOpen. Only use when the camera is idle.\n");
     printf("--set-capture-target sd|ram|both with --inspect-controls explicitly applies and verifies one camera storage destination.\n");
+    printf("--photo-name-prefix numbers Mac copies from either shutter; empty preserves camera filenames.\n");
     printf("Optional --parent-pid must match the launching process; its exit cancels this worker.\n");
     printf("Atomically updates latest.jpg and status.json. Only --interactive accepts explicit capture and control requests on stdin.\n");
     printf("Close Tether and other camera/import software before a hardware run. No driver seizure or process termination is attempted.\n");
@@ -1593,6 +1931,10 @@ int main(int argc, const char *argv[]) {
             NSString *value = [NSString stringWithUTF8String:argv[++i]];
             if ([arg isEqual:@"--output-dir"]) options.output = value.stringByExpandingTildeInPath;
             else if ([arg isEqual:@"--camera-save-dir"]) options.cameraSaveDirectory = value;
+            else if ([arg isEqual:@"--photo-name-prefix"]) {
+                if (!s1h_photo_prefix_valid(value)) { usage(argv[0]); return 2; }
+                options.photoNamePrefix = value;
+            }
             else if ([arg isEqual:@"--set-capture-target"]) {
                 options.explicitStorageTarget = @{ @"sd": @0, @"ram": @1, @"both": @2 }[value];
                 if (!options.explicitStorageTarget) { usage(argv[0]); return 2; }
@@ -1619,6 +1961,7 @@ int main(int argc, const char *argv[]) {
             (options.closeStaleSession && !options.inspectControls && !options.interactive) ||
             (options.explicitStorageTarget && !options.inspectControls) ||
             (options.cameraSaveDirectory && (!options.interactive || !options.cameraSaveDirectory.isAbsolutePath)) ||
+            (options.photoNamePrefix && !options.interactive) ||
             (options.inspectControls && (options.interactive || ![options.previewFormat isEqualToString:@"auto"] || options.keepPreviewFormat))) {
             usage(argv[0]); return 2;
         }

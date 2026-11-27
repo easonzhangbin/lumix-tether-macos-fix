@@ -129,7 +129,7 @@ static NSString *s1h_control_value_label(NSString *key, NSNumber *value) {
     return [NSString stringWithFormat:@"%u", raw];
 }
 static NSDictionary *s1h_control_unavailable(NSDictionary *spec, NSString *reason) {
-    return @{@"label":spec[@"label"], @"current":NSNull.null, @"options":@[], @"writable":@NO,
+    return @{@"label":spec[@"label"] ?: @"Camera control", @"current":NSNull.null, @"options":@[], @"writable":@NO,
              @"available":@NO, @"reason":reason ?: @"Camera control is unavailable."};
 }
 static NSDictionary *s1h_control_query(NativePreviewTransport *transport, NSDictionary *spec) {

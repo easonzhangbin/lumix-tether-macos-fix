@@ -6,10 +6,19 @@
 #import <QuartzCore/QuartzCore.h>
 #import "S1HBorderBeam.h"
 #import "S1HControlPanel.h"
+#import "S1HInterfaceStyle.h"
+#import "S1HPhotoNaming.h"
+#import "S1HPreviewView.h"
+#include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+enum { ConnectionRetryInitialDelay = 3, ConnectionRetryMaximumDelay = 30 };
+enum { CachedRunLimit = 8, CompletedRunGraceSeconds = 60, MaximumStatusBytes = 2 * 1024 * 1024 };
 
 typedef struct {
     ino_t inode;
@@ -51,9 +60,66 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     return frame;
 }
 
+static NSDictionary *readWorkerStatus(NSURL *directory, NSDate **modified) {
+    if (!directory) return nil;
+    NSURL *url = [directory URLByAppendingPathComponent:@"status.json"];
+    int fd = open(url.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) return nil;
+    struct stat info;
+    if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 || info.st_size > MaximumStatusBytes) {
+        close(fd);
+        return nil;
+    }
+    NSFileHandle *file = [[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:YES];
+    NSData *data = [file readDataUpToLength:(NSUInteger)info.st_size error:NULL];
+    [file closeAndReturnError:NULL];
+    if (data.length != (NSUInteger)info.st_size) return nil;
+    id status = [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    if (![status isKindOfClass:NSDictionary.class]) return nil;
+    if (modified) *modified = [NSDate dateWithTimeIntervalSince1970:info.st_mtimespec.tv_sec + info.st_mtimespec.tv_nsec / 1e9];
+    return status;
+}
+
+static NSURL *canonicalDirectory(NSURL *url) {
+    NSString *ancestor = url.path;
+    if (!url.fileURL || !ancestor.isAbsolutePath) return nil;
+    NSMutableArray<NSString *> *missing = [NSMutableArray array];
+    for (;;) {
+        const char *path = ancestor.fileSystemRepresentation;
+        char *resolved = realpath(path, NULL);
+        struct stat info;
+        if (resolved) {
+            BOOL isDirectory = stat(resolved, &info) == 0 && S_ISDIR(info.st_mode);
+            NSString *canonical = isDirectory ? [NSFileManager.defaultManager
+                stringWithFileSystemRepresentation:resolved length:strlen(resolved)] : nil;
+            free(resolved);
+            if (!canonical) return nil;
+            for (NSString *component in missing.reverseObjectEnumerator)
+                canonical = [canonical stringByAppendingPathComponent:component];
+            return [NSURL fileURLWithPath:canonical isDirectory:YES];
+        }
+        // Resolve existing aliases, including /var, before passing a path to
+        // the worker. A missing leaf can be created, a dangling link cannot.
+        if (errno != ENOENT || lstat(path, &info) == 0 || errno != ENOENT) return nil;
+        NSString *component = ancestor.lastPathComponent;
+        NSString *parent = ancestor.stringByDeletingLastPathComponent;
+        if ([parent isEqualToString:ancestor] || !component.length ||
+            [component isEqualToString:@"."] || [component isEqualToString:@".."]) return nil;
+        [missing addObject:component];
+        ancestor = parent;
+    }
+}
+
+static NSString *usbLinkLabel(id speed) {
+    if (![speed isKindOfClass:NSNumber.class] || [speed longLongValue] <= 0) return nil;
+    double mbps = [speed doubleValue] / 1000000.0;
+    return mbps >= 1000 ? [NSString stringWithFormat:@"USB %.3g Gbps", mbps / 1000.0] :
+        [NSString stringWithFormat:@"USB %.3g Mbps", mbps];
+}
+
 @interface PreviewApp : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property(nonatomic,strong) NSWindow *window;
-@property(nonatomic,strong) NSView *previewView;
+@property(nonatomic,strong) S1HPreviewView *previewView;
 @property(nonatomic,strong) NSTextField *stateLabel;
 @property(nonatomic,strong) NSTextField *metricsLabel;
 @property(nonatomic,strong) NSButton *startButton;
@@ -64,12 +130,15 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
 @property(nonatomic,strong) S1HControlPanel *controlPanel;
 @property(nonatomic,strong) NSPipe *commandPipe;
 @property(nonatomic,strong) NSURL *saveDirectory;
+@property(nonatomic,copy) NSString *photoNamePrefix;
 @property(nonatomic,copy) NSDictionary *pendingAction;
 @property(nonatomic,copy) NSString *cameraSaveDirectory;
 @property(nonatomic,copy) NSString *cameraTransferID;
 @property(nonatomic,copy) NSString *cameraTransferStatus;
 @property(nonatomic,strong) NSURL *lastSavedPhotoURL;
 @property(nonatomic,strong) NSDictionary *currentControls;
+@property(nonatomic,strong) NSNumber *cameraBatteryPercent;
+@property(nonatomic,copy) NSString *cameraUSBLink;
 @property(nonatomic) BOOL cameraReady;
 @property(nonatomic) BOOL captureAvailable;
 @property(nonatomic) BOOL requiresReview;
@@ -89,6 +158,9 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
 @property(nonatomic,strong) NSFileHandle *logFile;
 @property(nonatomic,strong) NSURL *baseOutputURL;
 @property(nonatomic,strong) NSURL *outputURL;
+@property(nonatomic,copy) NSString *workerFailureMessage;
+@property(nonatomic) NSUInteger reconnectDelay;
+@property(nonatomic) BOOL workerStopRequested;
 @property(nonatomic) BOOL desiredRunning;
 @property(nonatomic) BOOL terminating;
 @property(nonatomic) BOOL chinese;
@@ -107,6 +179,102 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     label.lineBreakMode = NSLineBreakByTruncatingMiddle;
     return label;
 }
+- (NSPopUpButton *)previewTools {
+    NSPopUpButton *button = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(676, 9, 126, 30) pullsDown:YES];
+    [button addItemWithTitle:[self text:@"取景与诊断" english:@"View & Tools"]];
+    NSArray<NSString *> *titles = @[
+        [self text:@"适合窗口" english:@"Fit Window"],
+        [self text:@"100% 实际像素" english:@"100% Actual Pixels"],
+        [self text:@"200% 放大（可拖动）" english:@"200% Zoom (Drag to Pan)"]
+    ];
+    for (NSUInteger index = 0; index < titles.count; ++index) {
+        NSMenuItem *item = [button.menu addItemWithTitle:titles[index] action:@selector(previewZoomChanged:) keyEquivalent:@""];
+        item.target = self;
+        item.tag = (NSInteger)index;
+        item.state = (NSInteger)index == self.previewView.pixelZoom ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    NSMenuItem *grid = [button.menu addItemWithTitle:[self text:@"构图九宫格" english:@"Composition Grid"]
+        action:@selector(previewGridChanged:) keyEquivalent:@""];
+    grid.target = self;
+    grid.state = self.previewView.showsGrid ? NSControlStateValueOn : NSControlStateValueOff;
+    [button.menu addItem:NSMenuItem.separatorItem];
+    NSMenuItem *report = [button.menu addItemWithTitle:[self text:@"相机接口报告…" english:@"Camera Capability Report…"]
+        action:@selector(showDeviceCapabilities:) keyEquivalent:@""];
+    report.target = self;
+    S1HStylePopup(button);
+    return button;
+}
+- (void)previewZoomChanged:(NSMenuItem *)sender {
+    self.previewView.pixelZoom = sender.tag;
+    [NSUserDefaults.standardUserDefaults setInteger:self.previewView.pixelZoom forKey:@"previewPixelZoom"];
+    for (NSMenuItem *item in sender.menu.itemArray) {
+        if (item.action == @selector(previewZoomChanged:))
+            item.state = item == sender ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+}
+- (void)previewGridChanged:(NSMenuItem *)sender {
+    self.previewView.showsGrid = !self.previewView.showsGrid;
+    sender.state = self.previewView.showsGrid ? NSControlStateValueOn : NSControlStateValueOff;
+    [NSUserDefaults.standardUserDefaults setBool:self.previewView.showsGrid forKey:@"previewGrid"];
+}
+- (void)showDeviceCapabilities:(id)sender {
+    (void)sender;
+    if (self.window.attachedSheet) return;
+    NSDictionary *status = readWorkerStatus(self.outputURL, NULL);
+    NSDictionary *device = status[@"device_capabilities"];
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = [self text:@"相机接口报告" english:@"Camera Capability Report"];
+    if (![device isKindOfClass:NSDictionary.class]) {
+        alert.informativeText = [self text:@"连接相机并等待取景后，可查看相机上报的 PTP 接口。"
+                                    english:@"Connect the camera and wait for live view to inspect the reported PTP capabilities."];
+        [alert beginSheetModalForWindow:self.window completionHandler:nil];
+        return;
+    }
+    NSMutableString *report = [NSMutableString stringWithFormat:@"%@ · PTP\n", device[@"model"] ?: @"DC-S1H"];
+    NSString *link = usbLinkLabel(status[@"usb_link_bps"]);
+    if (link) [report appendFormat:@"%@\n", link];
+    NSNumber *battery = [status[@"battery_percent"] isKindOfClass:NSNumber.class] ? status[@"battery_percent"] : nil;
+    if (battery && battery.integerValue >= 0 && battery.integerValue <= 100)
+        [report appendFormat:[self text:@"相机电量 %ld%%\n" english:@"Camera battery %ld%%\n"], (long)battery.integerValue];
+    NSDictionary<NSString *, NSString *> *labels = @{
+        @"operations": [self text:@"操作" english:@"Operations"],
+        @"events": [self text:@"事件" english:@"Events"],
+        @"properties": [self text:@"设备属性" english:@"Device properties"]
+    };
+    for (NSString *key in @[@"operations", @"events", @"properties"]) {
+        NSArray *values = [device[key] isKindOfClass:NSArray.class] ? device[key] : @[];
+        NSMutableArray<NSString *> *codes = [NSMutableArray arrayWithCapacity:values.count];
+        for (id value in values) {
+            if ([value isKindOfClass:NSNumber.class])
+                [codes addObject:[NSString stringWithFormat:@"0x%04X", [value unsignedIntValue]]];
+        }
+        [report appendFormat:@"\n%@ (%lu)\n%@\n", labels[key], (unsigned long)codes.count,
+            codes.count ? [codes componentsJoinedByString:@"  "] : @"—"];
+    }
+    alert.informativeText = [self text:@"相机上报的 PTP 能力。当前可操作项以拍摄面板为准。"
+                                english:@"PTP capabilities reported by the camera. The capture panel shows the controls currently available in this app."];
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 532, 270)];
+    scroll.hasVerticalScroller = YES;
+    scroll.borderType = NSNoBorder;
+    NSTextView *text = [[NSTextView alloc] initWithFrame:scroll.contentView.bounds];
+    text.editable = NO;
+    text.selectable = YES;
+    text.verticallyResizable = YES;
+    text.autoresizingMask = NSViewWidthSizable;
+    text.textContainer.widthTracksTextView = YES;
+    text.textContainerInset = NSMakeSize(8, 8);
+    text.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+    text.string = report;
+    scroll.documentView = text;
+    alert.accessoryView = scroll;
+    [alert addButtonWithTitle:[self text:@"关闭" english:@"Close"]];
+    [alert addButtonWithTitle:[self text:@"复制报告" english:@"Copy Report"]];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response != NSAlertSecondButtonReturn) return;
+        [NSPasteboard.generalPasteboard clearContents];
+        [NSPasteboard.generalPasteboard setString:report forType:NSPasteboardTypeString];
+    }];
+}
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     (void)notification;
     self.chinese = [NSLocale.preferredLanguages.firstObject hasPrefix:@"zh"];
@@ -114,57 +282,81 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     self.baseOutputURL = [cache URLByAppendingPathComponent:@"S1H Native Preview/experimental" isDirectory:YES];
     [NSFileManager.defaultManager createDirectoryAtURL:self.baseOutputURL withIntermediateDirectories:YES attributes:nil error:NULL];
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 1160, 760)
-        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable |
+                  NSWindowStyleMaskResizable | NSWindowStyleMaskFullSizeContentView
         backing:NSBackingStoreBuffered defer:NO];
     self.window.title = @"S1H Native Tether";
     self.window.minSize = NSMakeSize(850, 550);
+    self.window.titlebarAppearsTransparent = YES;
+    self.window.opaque = NO;
+    self.window.backgroundColor = NSColor.clearColor;
     self.window.delegate = self;
-    NSView *view = self.window.contentView;
-    self.previewView = [[NSView alloc] initWithFrame:NSMakeRect(16, 72, 780, 618)];
-    self.previewView.layer = [CALayer layer];
-    self.previewView.wantsLayer = YES;
-    self.previewView.layer.backgroundColor = NSColor.blackColor.CGColor;
-    self.previewView.layer.contentsGravity = kCAGravityResizeAspect;
-    self.previewView.layer.actions = @{@"contents": NSNull.null};
+
+    NSView *content = self.window.contentView;
+    NSVisualEffectView *backdrop = [[NSVisualEffectView alloc] initWithFrame:content.bounds];
+    backdrop.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    backdrop.material = NSVisualEffectMaterialUnderWindowBackground;
+    backdrop.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    [content addSubview:backdrop];
+    NSRect workspace = [content convertRect:self.window.contentLayoutRect fromView:nil];
+    NSView *view = [[NSView alloc] initWithFrame:workspace];
+    view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [content addSubview:view];
+    CGFloat height = NSHeight(view.bounds);
+    self.previewView = [[S1HPreviewView alloc] initWithFrame:NSMakeRect(16, 72, 780, height - 142)];
+    self.previewView.pixelZoom = [NSUserDefaults.standardUserDefaults integerForKey:@"previewPixelZoom"];
+    self.previewView.showsGrid = [NSUserDefaults.standardUserDefaults boolForKey:@"previewGrid"];
     self.previewView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [self.previewView setAccessibilityLabel:[self text:@"相机实时取景" english:@"Camera live view"]];
     [view addSubview:self.previewView];
+
+    NSView *toolbar = [NSView new];
+    NSView *toolbarGlass = S1HStyleGlass(NSMakeRect(16, height - 58, NSWidth(view.bounds) - 32, 48),
+        toolbar, NSVisualEffectMaterialHeaderView, 12.0);
+    toolbarGlass.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    [view addSubview:toolbarGlass];
     self.startButton = [NSButton buttonWithTitle:[self text:@"连接" english:@"Connect"] target:self action:@selector(start:)];
-    self.startButton.frame = NSMakeRect(16, 712, 94, 30);
-    self.startButton.autoresizingMask = NSViewMinYMargin;
-    [view addSubview:self.startButton];
+    self.startButton.frame = NSMakeRect(12, 9, 94, 30);
+    S1HStyleButton(self.startButton);
+    [toolbar addSubview:self.startButton];
     self.startButtonBeam = [[S1HBorderBeam alloc] initWithFrame:self.startButton.frame];
-    self.startButtonBeam.autoresizingMask = self.startButton.autoresizingMask;
-    [view addSubview:self.startButtonBeam positioned:NSWindowAbove relativeTo:self.startButton];
+    [toolbar addSubview:self.startButtonBeam positioned:NSWindowAbove relativeTo:self.startButton];
     [self setConnectButtonEnabled:YES];
     self.stopButton = [NSButton buttonWithTitle:[self text:@"停止" english:@"Stop"] target:self action:@selector(stop:)];
-    self.stopButton.frame = NSMakeRect(118, 712, 94, 30);
+    self.stopButton.frame = NSMakeRect(118, 9, 94, 30);
     self.stopButton.enabled = NO;
-    self.stopButton.autoresizingMask = NSViewMinYMargin;
-    [view addSubview:self.stopButton];
+    S1HStyleButton(self.stopButton);
+    [toolbar addSubview:self.stopButton];
     self.reconnectBox = [NSButton checkboxWithTitle:[self text:@"断线后重试" english:@"Retry after disconnect"] target:self action:@selector(reconnectChanged:)];
-    self.reconnectBox.frame = NSMakeRect(232, 712, 230, 30);
+    self.reconnectBox.frame = NSMakeRect(224, 9, 216, 30);
     self.reconnectBox.state = NSControlStateValueOn;
-    self.reconnectBox.autoresizingMask = NSViewMinYMargin;
-    [view addSubview:self.reconnectBox];
-    self.qualityPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(468, 712, 214, 30) pullsDown:NO];
+    [toolbar addSubview:self.reconnectBox];
+    self.qualityPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(452, 9, 214, 30) pullsDown:NO];
     [self.qualityPopup addItemsWithTitles:@[[self text:@"保持相机当前分辨率" english:@"Keep camera setting"], [self text:@"标准预览分辨率" english:@"Standard resolution"], [self text:@"最高预览分辨率" english:@"Highest resolution"]]];
     NSString *savedFormat = [NSUserDefaults.standardUserDefaults stringForKey:@"previewFormat"];
-    if ([savedFormat isEqualToString:@"max"]) [self.qualityPopup selectItemAtIndex:2];
-    else if ([savedFormat isEqualToString:@"0"]) [self.qualityPopup selectItemAtIndex:1];
+    NSInteger formatIndex = 2;
+    if ([savedFormat isEqualToString:@"0"]) formatIndex = 1;
+    else if ([savedFormat isEqualToString:@"auto"]) formatIndex = 0;
+    [self.qualityPopup selectItemAtIndex:formatIndex];
     self.qualityPopup.target = self;
     self.qualityPopup.action = @selector(qualityChanged:);
-    self.qualityPopup.autoresizingMask = NSViewMinYMargin;
-    [view addSubview:self.qualityPopup];
-    self.controlPanel = [[S1HControlPanel alloc] initWithFrame:NSMakeRect(812, 72, 332, 618)];
+    S1HStylePopup(self.qualityPopup);
+    [toolbar addSubview:self.qualityPopup];
+    [toolbar addSubview:[self previewTools]];
+    self.controlPanel = [[S1HControlPanel alloc] initWithFrame:NSMakeRect(812, 72, 332, height - 142)];
     self.controlPanel.autoresizingMask = NSViewMinXMargin | NSViewHeightSizable;
     __weak PreviewApp *panelSelf = self;
     self.controlPanel.onCapture = ^(NSString *target) { [panelSelf capturePhotoWithTarget:target]; };
+    self.controlPanel.onSetBodyCaptureTarget = ^(NSString *target) { [panelSelf setBodyCaptureTarget:target]; };
     self.controlPanel.onChooseDirectory = ^{ [panelSelf chooseSaveDirectory]; };
+    self.controlPanel.onChoosePhotoNaming = ^{ [panelSelf choosePhotoNaming]; };
     self.controlPanel.onSetProperty = ^(NSString *key, NSNumber *raw) { [panelSelf setCameraProperty:key value:raw]; };
     self.controlPanel.onRefresh = ^{ [panelSelf refreshCameraControls]; };
+    self.controlPanel.onFocusStep = ^(NSString *direction) { [panelSelf stepRemoteFocus:direction]; };
     self.controlPanel.onRevealSavedPhoto = ^{ [panelSelf revealSavedPhoto]; };
     NSString *savedDirectory = [NSUserDefaults.standardUserDefaults stringForKey:@"photoSaveDirectory"];
+    NSString *savedPrefix = [NSUserDefaults.standardUserDefaults stringForKey:@"photoNamePrefix"] ?: @"";
+    self.photoNamePrefix = s1h_photo_prefix_valid(savedPrefix) ? savedPrefix : @"";
     NSURL *pictures = [NSFileManager.defaultManager URLsForDirectory:NSPicturesDirectory inDomains:NSUserDomainMask].firstObject;
     NSURL *rememberedDirectory = savedDirectory.isAbsolutePath ? [NSURL fileURLWithPath:savedDirectory isDirectory:YES] : nil;
     self.saveDirectory = [self photoDirectory:rememberedDirectory] ?: [pictures URLByAppendingPathComponent:@"S1H Tether" isDirectory:YES];
@@ -221,13 +413,18 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     if (self.worker || self.pendingAction || self.terminating) return;
     if (self.requiresReview) [self.controlPanel setResultMessage:nil];
     self.requiresReview = NO;
+    self.reconnectDelay = 0;
     self.stateLabel.textColor = NSColor.labelColor;
     self.desiredRunning = YES;
     self.generation += 1;
     [self launchWorkerClosingStaleSession:closeStaleSession];
 }
+- (NSURL *)workerSessionsDirectory {
+    // Older builds only prune UUID folders directly under baseOutputURL.
+    return [self.baseOutputURL URLByAppendingPathComponent:@"sessions" isDirectory:YES];
+}
 - (void)pruneOldRuns {
-    NSArray<NSURL *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:self.baseOutputURL
+    NSArray<NSURL *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtURL:[self workerSessionsDirectory]
         includingPropertiesForKeys:@[NSURLCreationDateKey, NSURLIsDirectoryKey, NSURLIsSymbolicLinkKey]
         options:NSDirectoryEnumerationSkipsHiddenFiles error:NULL];
     NSMutableArray<NSDictionary *> *runs = [NSMutableArray array];
@@ -240,11 +437,19 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     [runs sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
         return [a[@"created"] compare:b[@"created"]];
     }];
-    while (runs.count > 8) {
-        NSURL *old = runs.firstObject[@"url"];
-        // Only this app's generated UUID directories inside its own cache.
-        if (![old isEqual:self.outputURL]) [NSFileManager.defaultManager removeItemAtURL:old error:NULL];
-        [runs removeObjectAtIndex:0];
+    NSUInteger remaining = runs.count;
+    NSDate *oldEnough = [NSDate dateWithTimeIntervalSinceNow:-CompletedRunGraceSeconds];
+    for (NSDictionary *run in runs) {
+        if (remaining <= CachedRunLimit) break;
+        NSURL *url = run[@"url"];
+        if ([url.lastPathComponent isEqualToString:self.outputURL.lastPathComponent]) continue;
+        NSDate *modified = nil;
+        id state = readWorkerStatus(url, &modified)[@"status"];
+        // Other installed copies can own a live run in the same cache, and
+        // a newly finished worker still needs its result read by its app.
+        if (([state isEqual:@"error"] || [state isEqual:@"stopped"]) &&
+            [modified compare:oldEnough] == NSOrderedAscending &&
+            [NSFileManager.defaultManager removeItemAtURL:url error:NULL]) remaining--;
     }
 }
 - (void)launchWorkerClosingStaleSession:(BOOL)closeStaleSession {
@@ -257,7 +462,7 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
         return;
     }
     self.stateLabel.stringValue = [self text:@"正在连接 S1H……" english:@"Connecting to the S1H…"];
-    self.outputURL = [self.baseOutputURL URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
+    self.outputURL = [[self workerSessionsDirectory] URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
     NSError *directoryError = nil;
     if (![NSFileManager.defaultManager createDirectoryAtURL:self.outputURL withIntermediateDirectories:YES attributes:nil error:&directoryError]) {
         self.stateLabel.stringValue = [self text:@"无法创建本次预览缓存目录。" english:@"Could not create this preview session's cache."];
@@ -266,14 +471,19 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     }
     self.cameraReady = NO;
     self.captureAvailable = NO;
+    self.workerFailureMessage = nil;
     self.pendingAction = nil;
     self.cameraTransferID = nil;
     self.cameraTransferStatus = nil;
     self.currentControls = @{};
+    [self.controlPanel setRemoteFocusAvailable:NO];
+    self.cameraBatteryPercent = nil;
+    self.cameraUSBLink = nil;
+    [self.controlPanel setTransferProgressMessage:nil fraction:-1.0];
     [self.controlPanel setCameraReady:NO];
     [self.controlPanel setCaptureAvailable:NO];
     [self.controlPanel updateCapabilities:@{} busy:NO];
-    self.previewView.layer.contents = nil;
+    [self.previewView displayFrame:NULL];
     self.lastFrameIdentity = (PreviewFrameIdentity){0};
     self.viewWidth = 0;
     self.viewHeight = 0;
@@ -281,6 +491,7 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     self.frameSampleTime = 0;
     self.updatesPerSecond = -1;
     self.metricsLabel.stringValue = @"—";
+    self.metricsLabel.toolTip = nil;
     [self pruneOldRuns];
     [self setConnectButtonEnabled:NO];
     self.stopButton.enabled = YES;
@@ -294,6 +505,7 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     NSMutableArray *arguments = [@[@"--output-dir", self.outputURL.path, @"--frames", @"1000000000", @"--fps", @"30",
         @"--parent-pid", [NSString stringWithFormat:@"%d", NSProcessInfo.processInfo.processIdentifier], @"--interactive"] mutableCopy];
     if (closeStaleSession) [arguments addObject:@"--close-stale-session"];
+    if (self.photoNamePrefix.length) [arguments addObjectsFromArray:@[@"--photo-name-prefix", self.photoNamePrefix]];
     NSURL *directory = [self photoDirectory:self.saveDirectory];
     self.cameraSaveDirectory = nil;
     if (directory && [NSFileManager.defaultManager createDirectoryAtURL:directory withIntermediateDirectories:YES
@@ -313,6 +525,7 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     task.standardOutput = self.workerPipe;
     task.standardError = self.workerPipe;
     self.worker = task;
+    self.workerStopRequested = NO;
     __weak PreviewApp *weakSelf = self;
     NSFileHandle *workerLog = self.logFile;
     __block NSUInteger loggedBytes = 0;
@@ -349,7 +562,8 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     // Read a final action result before tearing down this run's status path.
     [self refresh:nil];
     if (self.pendingAction) {
-        if ([self.pendingAction[@"action"] isEqual:@"capture"]) self.requiresReview = YES;
+        id kind = self.pendingAction[@"action"];
+        if ([kind isEqual:@"capture"] || [kind isEqual:@"set_body_capture_target"]) self.requiresReview = YES;
         [self.controlPanel setWarningMessage:[self text:@"连接已结束，操作结果尚未确认。请检查相机和照片目录。" english:@"The connection ended before the operation was confirmed. Check the camera and photo folder."]];
     }
     if ([self cameraTransferInProgress]) {
@@ -364,12 +578,14 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     @try { [self.commandPipe.fileHandleForWriting closeFile]; } @catch (NSException *exception) { (void)exception; }
     self.commandPipe = nil;
     self.worker = nil;
+    self.workerStopRequested = NO;
     self.cameraReady = NO;
     self.captureAvailable = NO;
     self.metricsLabel.stringValue = @"—";
     self.pendingAction = nil;
     self.cameraSaveDirectory = nil;
     self.cameraTransferStatus = nil;
+    [self.controlPanel setTransferProgressMessage:nil fraction:-1.0];
     [self.controlPanel setCameraReady:NO];
     [self.controlPanel setCaptureAvailable:NO];
     [self.controlPanel updateCapabilities:self.currentControls ?: @{} busy:NO];
@@ -391,16 +607,25 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
         self.stateLabel.stringValue = [self text:@"已停止，通信进程已退出。" english:@"Stopped; the USB worker has exited."];
         return;
     }
+    if (self.workerFailureMessage.length) {
+        self.metricsLabel.stringValue = self.workerFailureMessage;
+        self.metricsLabel.toolTip = self.workerFailureMessage;
+    }
     if (self.reconnectBox.state != NSControlStateValueOn) {
         self.desiredRunning = NO;
         self.stateLabel.stringValue = [self text:@"连接已结束，可再次点击“连接”。" english:@"The connection ended. Click Connect to try again."];
         return;
     }
-    self.stateLabel.stringValue = [self text:@"等待相机；3 秒后重试。" english:@"Waiting for the camera; retrying in 3 seconds."];
+    self.reconnectDelay = self.reconnectDelay ? MIN(self.reconnectDelay * 2, ConnectionRetryMaximumDelay) : ConnectionRetryInitialDelay;
+    NSString *waiting = [self text:@"等待相机，%lu 秒后重试。" english:@"Waiting for the camera. Retrying in %lu seconds."];
+    self.stateLabel.stringValue = [NSString stringWithFormat:waiting, (unsigned long)self.reconnectDelay];
     self.stopButton.enabled = YES;
     NSUInteger generation = self.generation;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-        if (self.generation == generation && self.desiredRunning) [self launchWorkerClosingStaleSession:NO];
+    __weak PreviewApp *weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, self.reconnectDelay * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        PreviewApp *app = weakSelf;
+        if (app.generation == generation && app.desiredRunning && app.reconnectBox.state == NSControlStateValueOn)
+            [app launchWorkerClosingStaleSession:NO];
     });
 }
 - (void)reconnectChanged:(id)sender {
@@ -414,8 +639,10 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
 }
 - (void)stop:(id)sender {
     (void)sender;
+    if (self.worker && self.workerStopRequested) return;
     self.desiredRunning = NO;
     self.cameraReady = NO;
+    [self.controlPanel setTransferProgressMessage:nil fraction:-1.0];
     [self.controlPanel setCameraReady:NO];
     [self.controlPanel setCaptureAvailable:NO];
     [self.controlPanel setBusy:self.pendingAction != nil || [self cameraTransferInProgress]];
@@ -429,6 +656,7 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
         else self.stateLabel.stringValue = [self text:@"已停止。" english:@"Stopped."];
         return;
     }
+    self.workerStopRequested = YES;
     self.stateLabel.stringValue = [self text:@"正在停止并释放相机……" english:@"Stopping and releasing the camera…"];
     self.stopButton.enabled = NO;
     if (task.running) [task terminate];
@@ -439,9 +667,9 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     });
 }
 - (NSURL *)photoDirectory:(NSURL *)url {
-    NSURL *resolved = url.URLByResolvingSymlinksInPath.URLByStandardizingPath;
-    if (!resolved.fileURL || !resolved.path.isAbsolutePath) return nil;
-    NSString *cache = self.baseOutputURL.URLByResolvingSymlinksInPath.URLByStandardizingPath.path;
+    NSURL *resolved = canonicalDirectory(url);
+    NSString *cache = canonicalDirectory(self.baseOutputURL).path;
+    if (!resolved || !cache.length) return nil;
     NSString *destination = resolved.path.precomposedStringWithCanonicalMapping.lowercaseString;
     cache = cache.precomposedStringWithCanonicalMapping.lowercaseString;
     if ([destination isEqualToString:cache] || [destination hasPrefix:[cache stringByAppendingString:@"/"]]) return nil;
@@ -483,6 +711,40 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     self.saveDirectory = directory;
     [NSUserDefaults.standardUserDefaults setObject:directory.path forKey:@"photoSaveDirectory"];
     [self.controlPanel setSaveDirectory:directory.path];
+}
+- (void)savePhotoNamePrefix:(NSString *)prefix {
+    self.photoNamePrefix = prefix;
+    [NSUserDefaults.standardUserDefaults setObject:prefix forKey:@"photoNamePrefix"];
+    [self.controlPanel setResultMessage:[self text:@"已更新照片文件命名。" english:@"Updated photo file naming."]];
+}
+- (void)choosePhotoNaming {
+    if (self.pendingAction || [self cameraTransferInProgress] || self.terminating || self.window.attachedSheet) return;
+    NSAlert *panel = [NSAlert new];
+    panel.messageText = [self text:@"照片文件命名" english:@"Photo File Naming"];
+    panel.informativeText = [self text:@"填入前缀后，保存到 Mac 的照片会自动编号，例如「样片_0001.RW2」。留空则沿用机身文件名。"
+        english:@"Enter a prefix to number photos saved to the Mac, such as Sample_0001.RW2. Leave it blank to keep camera filenames."];
+    [panel addButtonWithTitle:[self text:@"保存" english:@"Save"]];
+    [panel addButtonWithTitle:[self text:@"取消" english:@"Cancel"]];
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 270, 24)];
+    field.placeholderString = [self text:@"文件名前缀" english:@"Filename prefix"];
+    field.accessibilityLabel = field.placeholderString;
+    field.stringValue = self.photoNamePrefix;
+    panel.accessoryView = field;
+    panel.window.initialFirstResponder = field;
+    [panel beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response != NSAlertFirstButtonReturn) return;
+        NSString *prefix = [field.stringValue stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        if (!s1h_photo_prefix_valid(prefix)) {
+            [self.controlPanel setWarningMessage:[self text:@"请输入较短的前缀，避免用点开头、路径符号或控制字符。"
+                english:@"Use a shorter prefix without a leading dot, path punctuation, or control characters."]];
+        } else if (!self.worker) {
+            [self savePhotoNamePrefix:prefix];
+        } else if (self.pendingAction || [self cameraTransferInProgress] || !self.cameraReady) {
+            [self.controlPanel setWarningMessage:[self text:@"请等相机空闲后再更改照片文件命名。" english:@"Wait until the camera is ready before changing photo file naming."]];
+        } else if ([self sendAction:@{@"action": @"set_photo_name_prefix", @"prefix": prefix}]) {
+            [self.controlPanel setResultMessage:[self text:@"正在更新照片文件命名……" english:@"Updating photo file naming…"]];
+        }
+    }];
 }
 - (void)revealSavedPhoto {
     NSURL *photo = self.lastSavedPhotoURL;
@@ -536,17 +798,27 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
         [self.controlPanel setWarningMessage:[self text:@"无法创建照片文件夹，请重新选择保存位置。" english:@"Could not create the photo folder. Choose another destination."]];
         return;
     }
-    if ([self sendAction:@{@"action": @"capture", @"directory": directory.path, @"target": target}])
-        [self.controlPanel setResultMessage:[self text:@"正在拍摄并保存原片……" english:@"Capturing and saving originals…"]];
+    if ([self sendAction:@{@"action": @"capture", @"directory": directory.path, @"target": target}]) {
+        [self.controlPanel setResultMessage:nil];
+        [self showCaptureProgress:@{}];
+    }
 }
 - (void)setCameraProperty:(NSString *)key value:(NSNumber *)value {
     if ([self sendAction:@{@"action": @"set", @"property": key, @"value": value}])
         [self.controlPanel setResultMessage:[self text:@"正在设置并回读确认……" english:@"Applying and verifying the setting…"]];
     else [self.controlPanel updateCapabilities:self.currentControls ?: @{} busy:self.pendingAction != nil || [self cameraTransferInProgress]];
 }
+- (void)setBodyCaptureTarget:(NSString *)target {
+    if ([self sendAction:@{@"action": @"set_body_capture_target", @"target": target}])
+        [self.controlPanel setResultMessage:[self text:@"正在更改并回读机身存储目标……" english:@"Applying and verifying the camera storage target…"]];
+}
 - (void)refreshCameraControls {
     if ([self sendAction:@{@"action": @"refresh"}])
         [self.controlPanel setResultMessage:[self text:@"正在读取相机实际设置……" english:@"Reading the camera settings…"]];
+}
+- (void)stepRemoteFocus:(NSString *)direction {
+    if ([self sendAction:@{@"action":@"focus_step", @"direction":direction}])
+        [self.controlPanel setResultMessage:[self text:@"正在微调焦点……" english:@"Adjusting focus…"]];
 }
 - (NSUInteger)confirmSavedFiles:(NSArray *)files inDirectory:(NSString *)directory {
     NSUInteger count = 0;
@@ -567,6 +839,54 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
 - (BOOL)cameraTransferInProgress {
     return [self.cameraTransferStatus isEqualToString:@"busy"];
 }
+- (void)showCaptureProgress:(NSDictionary *)snapshot {
+    if (!snapshot) {
+        [self.controlPanel setTransferProgressMessage:nil fraction:-1.0];
+        return;
+    }
+    NSString *phase = [snapshot[@"phase"] isKindOfClass:NSString.class] ? snapshot[@"phase"] : @"preparing";
+    NSNumber *received = [snapshot[@"downloaded_bytes"] isKindOfClass:NSNumber.class] ? snapshot[@"downloaded_bytes"] : nil;
+    NSNumber *total = [snapshot[@"total_bytes"] isKindOfClass:NSNumber.class] ? snapshot[@"total_bytes"] : nil;
+    double fraction = -1.0;
+    if (received && isfinite(total.doubleValue) && total.doubleValue > 0.0 &&
+        received.doubleValue >= 0.0 && received.doubleValue <= total.doubleValue)
+        fraction = received.doubleValue / total.doubleValue;
+
+    NSString *message = [self text:@"正在准备拍摄…" english:@"Preparing to capture…"];
+    if ([phase isEqualToString:@"shutter"]) {
+        message = [self text:@"正在触发快门…" english:@"Triggering the shutter…"];
+    } else if ([phase isEqualToString:@"waiting"]) {
+        message = [self text:@"等待相机交付原片…" english:@"Waiting for the original…"];
+    } else if ([phase isEqualToString:@"verifying"]) {
+        message = [self text:@"正在校验并保存…" english:@"Verifying and saving…"];
+    } else if ([phase isEqualToString:@"download"]) {
+        message = [self text:@"正在传输原片…" english:@"Transferring the original…"];
+        if (fraction >= 0.0) {
+            NSNumber *fileIndex = [snapshot[@"file_index"] isKindOfClass:NSNumber.class] ? snapshot[@"file_index"] : nil;
+            NSInteger index = fileIndex.integerValue;
+            NSString *label = index > 0
+                ? [NSString stringWithFormat:[self text:@"文件 %ld" english:@"File %ld"], (long)index]
+                : [self text:@"传输" english:@"Transfer"];
+            message = [NSString stringWithFormat:@"%@ · %.1f / %.1f MB · %ld%%", label,
+                received.doubleValue / 1e6, total.doubleValue / 1e6, (long)floor(fraction * 100.0)];
+        }
+    }
+    if (![phase isEqualToString:@"download"] && ![phase isEqualToString:@"verifying"]) fraction = -1.0;
+    [self.controlPanel setTransferProgressMessage:message fraction:fraction];
+}
+- (void)updateCaptureProgressForAction:(NSDictionary *)action transfer:(NSDictionary *)transfer {
+    NSDictionary *progress = nil;
+    if (self.desiredRunning) {
+        if ([self cameraTransferInProgress] && [transfer[@"status"] isEqual:@"busy"] &&
+            [transfer[@"id"] isEqual:self.cameraTransferID]) {
+            progress = transfer;
+        } else if ([self.pendingAction[@"action"] isEqual:@"capture"]) {
+            BOOL matchingAction = [action[@"id"] isEqual:self.pendingAction[@"id"]] && [action[@"status"] isEqual:@"busy"];
+            progress = matchingAction ? action : @{};
+        }
+    }
+    [self showCaptureProgress:progress];
+}
 - (void)showCameraTransferStatus:(NSDictionary *)transfer previousDirectory:(NSString *)previousDirectory {
     NSString *identifier = [transfer[@"id"] isKindOfClass:NSString.class] ? transfer[@"id"] : nil;
     NSString *result = [transfer[@"status"] isKindOfClass:NSString.class] ? transfer[@"status"] : nil;
@@ -575,7 +895,7 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     self.cameraTransferID = identifier;
     self.cameraTransferStatus = result;
     if ([self cameraTransferInProgress]) {
-        [self.controlPanel setResultMessage:[self text:@"正在接收机身快门拍摄的原片……" english:@"Receiving photos taken with the camera shutter…"]];
+        [self.controlPanel setResultMessage:nil];
         return;
     }
 
@@ -601,33 +921,39 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     if (!pending || ![action[@"id"] isEqual:pending[@"id"]]) return;
     NSString *result = [action[@"status"] isKindOfClass:NSString.class] ? action[@"status"] : @"";
     NSString *detail = [action[@"message"] isKindOfClass:NSString.class] ? action[@"message"] : @"";
-    if ([result isEqualToString:@"busy"]) {
-        NSDictionary *phaseMessages = @{
-            @"preparing": [self text:@"正在准备拍摄……" english:@"Preparing to capture…"],
-            @"shutter": [self text:@"正在触发快门……" english:@"Triggering the shutter…"],
-            @"waiting": [self text:@"正在等待相机完成拍摄……" english:@"Waiting for the camera to finish…"],
-            @"download": [self text:@"正在接收原片……" english:@"Receiving the original…"]
-        };
-        NSDictionary *workerMessages = @{
-            @"Preparing camera action.": phaseMessages[@"preparing"],
-            @"Checking the camera before capture.": phaseMessages[@"preparing"],
-            @"Taking one photograph.": phaseMessages[@"shutter"],
-            @"Waiting for the camera to finish the capture.":
-                [self text:@"相机已接受快门，正在等待照片可下载……" english:@"Shutter accepted. Waiting for the photo to become available…"]
-        };
-        NSString *phase = [action[@"phase"] isKindOfClass:NSString.class] ? action[@"phase"] : @"";
-        NSString *progress = phaseMessages[phase] ?: workerMessages[detail] ?: detail;
-        NSNumber *total = [action[@"total_bytes"] isKindOfClass:NSNumber.class] ? action[@"total_bytes"] : nil;
-        NSNumber *downloaded = [action[@"downloaded_bytes"] isKindOfClass:NSNumber.class] ? action[@"downloaded_bytes"] : nil;
-        if (downloaded && total.doubleValue > 0 && downloaded.doubleValue >= 0 && downloaded.doubleValue <= total.doubleValue)
-            progress = [NSString stringWithFormat:@"%@ %.1f / %.1f MB", progress, downloaded.doubleValue / 1e6, total.doubleValue / 1e6];
-        if (progress.length) [self.controlPanel setResultMessage:progress];
-        return;
-    }
     if (![@[@"ok", @"rejected", @"error", @"outcome_unknown"] containsObject:result]) return;
     self.pendingAction = nil;
     BOOL captured = [pending[@"action"] isEqual:@"capture"];
     BOOL ok = [result isEqualToString:@"ok"];
+    if ([pending[@"action"] isEqual:@"focus_step"]) {
+        if (ok) [self.controlPanel setResultMessage:[self text:@"相机已确认本次调焦命令。" english:@"The camera accepted the focus adjustment."]];
+        else if ([result isEqual:@"rejected"])
+            [self.controlPanel setWarningMessage:[self text:@"请将机身设为 MF，再刷新相机参数。"
+                english:@"Set the camera to MF and refresh the camera settings."]];
+        else [self.controlPanel setWarningMessage:detail];
+        return;
+    }
+    if ([pending[@"action"] isEqual:@"set_body_capture_target"]) {
+        if (ok) {
+            [self.controlPanel setResultMessage:[self text:@"机身快门的存储目标已回读确认。" english:@"Camera shutter storage target confirmed."]];
+        } else if ([result isEqualToString:@"outcome_unknown"]) {
+            self.requiresReview = YES;
+            self.desiredRunning = NO;
+            [self.controlPanel setWarningMessage:[self text:@"无法确认机身快门的存储目标。请在机身检查后再连接。"
+                english:@"The camera shutter storage target is unconfirmed. Check the camera before reconnecting."]];
+        } else {
+            NSString *message = [self text:@"相机未确认存储目标更改。请检查存储卡并刷新参数。"
+                english:@"The camera did not confirm the storage target change. Check the card and refresh camera settings."];
+            [self.controlPanel setWarningMessage:detail.length ? [NSString stringWithFormat:@"%@ %@", message, detail] : message];
+        }
+        return;
+    }
+    if ([pending[@"action"] isEqual:@"set_photo_name_prefix"]) {
+        if (ok) [self savePhotoNamePrefix:pending[@"prefix"]];
+        else [self.controlPanel setWarningMessage:[self text:@"照片文件命名未能更新，请重新检查前缀。"
+            english:@"Photo file naming could not be updated. Check the prefix and try again."]];
+        return;
+    }
     if ([pending[@"action"] isEqual:@"set_camera_save_dir"]) {
         if (ok) {
             self.cameraSaveDirectory = pending[@"directory"];
@@ -675,15 +1001,29 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
 - (void)refresh:(NSTimer *)timer {
     (void)timer;
     if (!self.worker) return;
-    NSURL *statusURL = [self.outputURL URLByAppendingPathComponent:@"status.json"];
-    NSData *data = [NSData dataWithContentsOfURL:statusURL];
-    NSDictionary *status = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : nil;
-    if (![status isKindOfClass:NSDictionary.class]) return;
+    NSDictionary *status = readWorkerStatus(self.outputURL, NULL);
+    if (!status) return;
     NSString *state = [status[@"status"] isKindOfClass:NSString.class] ? status[@"status"] : @"";
+    NSString *message = [status[@"message"] isKindOfClass:NSString.class] ? status[@"message"] : state;
+    if ([state isEqualToString:@"error"] && message.length && ![message isEqualToString:state]) {
+        if ([message isEqualToString:@"Connect exactly one DC-S1H in PC(Tether) mode; its registry identity must be readable."])
+            message = [self text:@"请连接一台 DC-S1H，并在机身选择 PC(Tether)。" english:message];
+        else if ([message isEqualToString:@"Camera interface unavailable. Close other camera/import software first."])
+            message = [self text:@"相机接口不可用。请先退出其他相机或照片导入软件。" english:message];
+        self.workerFailureMessage = message;
+    }
     NSDictionary *controls = [status[@"controls"] isKindOfClass:NSDictionary.class] ? status[@"controls"] : @{};
+    NSDictionary *focus = [controls[@"focus_mode"] isKindOfClass:NSDictionary.class] ? controls[@"focus_mode"] : nil;
+    [self.controlPanel setRemoteFocusAvailable:[focus[@"current"] isEqual:@3]];
+    NSDictionary *cameraStorage = [status[@"capture_storage"] isKindOfClass:NSDictionary.class] ? status[@"capture_storage"] : nil;
+    [self.controlPanel setCameraStorage:cameraStorage];
+    NSNumber *battery = [status[@"battery_percent"] isKindOfClass:NSNumber.class] ? status[@"battery_percent"] : nil;
+    self.cameraBatteryPercent = battery && battery.integerValue >= 0 && battery.integerValue <= 100 ? battery : nil;
+    self.cameraUSBLink = usbLinkLabel(status[@"usb_link_bps"]);
     BOOL controlsChanged = ![self.currentControls isEqualToDictionary:controls];
     self.currentControls = controls;
-    if ([status[@"requires_review"] boolValue]) {
+    BOOL workerRequiresReview = [status[@"requires_review"] isEqual:@YES];
+    if (workerRequiresReview) {
         self.requiresReview = YES;
         self.desiredRunning = NO;
     }
@@ -701,14 +1041,24 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
     if (action) [self showActionStatus:action];
     NSDictionary *transfer = [status[@"camera_transfer"] isKindOfClass:NSDictionary.class] ? status[@"camera_transfer"] : nil;
     if (transfer) [self showCameraTransferStatus:transfer previousDirectory:previousDirectory];
+    [self updateCaptureProgressForAction:action transfer:transfer];
     self.cameraReady = self.desiredRunning && !self.requiresReview && [state isEqualToString:@"previewing"];
-    self.captureAvailable = [status[@"capture_available"] boolValue];
+    if (self.reconnectDelay && self.cameraReady && [status[@"frames"] isKindOfClass:NSNumber.class] &&
+        [status[@"frames"] unsignedIntegerValue] > 0) self.reconnectDelay = 0;
+    self.captureAvailable = [status[@"capture_available"] isEqual:@YES];
     [self.controlPanel setCameraReady:self.cameraReady];
     [self.controlPanel setCaptureAvailable:self.cameraReady && self.captureAvailable];
     BOOL busy = self.pendingAction != nil || [action[@"status"] isEqual:@"busy"] || [self cameraTransferInProgress];
     if (controlsChanged) [self.controlPanel updateCapabilities:controls busy:busy];
     else [self.controlPanel setBusy:busy];
-    if (self.requiresReview) [self showCaptureReviewRequired];
+    if (self.requiresReview) {
+        // The worker exits on its own when it requests review. A file check
+        // can also request review in the app while the session is healthy.
+        // Only stop that session once outstanding transfers have finished.
+        if (!workerRequiresReview && !blockedByStaleSession && !self.workerStopRequested && !busy && self.captureAvailable &&
+            [state isEqualToString:@"previewing"] && self.worker.running) [self stop:nil];
+        [self showCaptureReviewRequired];
+    }
     else if (blockedByStaleSession) [self showStaleSessionRecoveryRequired];
     else if ([state isEqualToString:@"previewing"] && self.desiredRunning) {
         if ([self cameraTransferInProgress]) {
@@ -722,7 +1072,6 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
             [self refreshPreviewMetrics];
         }
     } else if (self.desiredRunning) {
-        NSString *message = [status[@"message"] isKindOfClass:NSString.class] ? status[@"message"] : state;
         NSDictionary<NSString *, NSString *> *progressMessages = @{
             @"Starting experimental native USB preview.": [self text:@"正在启动实验原生 USB 预览……" english:@"Starting experimental native USB preview."],
             @"Connecting to DC-S1H.": [self text:@"正在连接 DC-S1H……" english:@"Connecting to DC-S1H."],
@@ -749,16 +1098,22 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
         self.updatesSinceSample = 0;
         self.frameSampleTime = now;
     }
-    if (self.updatesPerSecond < 0) {
-        self.metricsLabel.stringValue = [NSString stringWithFormat:@"%lu × %lu", (unsigned long)self.viewWidth, (unsigned long)self.viewHeight];
-        return;
+    NSMutableString *metrics = [NSMutableString stringWithFormat:@"%lu × %lu", (unsigned long)self.viewWidth, (unsigned long)self.viewHeight];
+    if (self.updatesPerSecond >= 0) {
+        [metrics appendFormat:[self text:@"    取景更新 %.1f 次/秒" english:@"    %.1f view updates/s"], self.updatesPerSecond];
     }
-    NSString *format = [self text:@"%lu × %lu    取景更新 %.1f 次/秒" english:@"%lu × %lu    %.1f view updates/s"];
-    self.metricsLabel.stringValue = [NSString stringWithFormat:format, (unsigned long)self.viewWidth, (unsigned long)self.viewHeight, self.updatesPerSecond];
+    if (self.cameraUSBLink) [metrics appendFormat:@"    %@", self.cameraUSBLink];
+    if (self.cameraBatteryPercent)
+        [metrics appendFormat:[self text:@"    电量 %ld%%" english:@"    Battery %ld%%"], (long)self.cameraBatteryPercent.integerValue];
+    self.metricsLabel.stringValue = metrics;
+}
+- (BOOL)canRefreshPreview {
+    return self.worker && self.desiredRunning && self.window.visible && !self.window.miniaturized &&
+        ![self.pendingAction[@"action"] isEqual:@"capture"] && ![self cameraTransferInProgress];
 }
 - (void)refreshPreview:(NSTimer *)timer {
     (void)timer;
-    if (!self.worker || !self.desiredRunning || !self.window.visible || self.window.miniaturized || self.framePending || [self cameraTransferInProgress]) return;
+    if (self.framePending || ![self canRefreshPreview]) return;
     NSURL *runURL = self.outputURL;
     NSURL *frameURL = [runURL URLByAppendingPathComponent:@"latest.jpg"];
     PreviewFrameIdentity previous = self.lastFrameIdentity;
@@ -771,8 +1126,8 @@ static CGImageRef copyLatestPreviewFrame(NSURL *url, PreviewFrameIdentity previo
             dispatch_async(dispatch_get_main_queue(), ^{
                 self.framePending = NO;
                 if (!frame) return;
-                if (self.worker && self.desiredRunning && self.generation == generation && [self.outputURL isEqual:runURL] && ![self cameraTransferInProgress]) {
-                    self.previewView.layer.contents = (__bridge id)frame;
+                if ([self canRefreshPreview] && self.generation == generation && [self.outputURL isEqual:runURL]) {
+                    [self.previewView displayFrame:frame];
                     self.lastFrameIdentity = identity;
                     self.viewWidth = CGImageGetWidth(frame);
                     self.viewHeight = CGImageGetHeight(frame);

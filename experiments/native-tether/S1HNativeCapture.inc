@@ -5,6 +5,8 @@
  * One invocation issues at most one shutter command. It never deletes a
  * camera object, retries a shutter, resets USB, or starts/stops preview.
  */
+#import "S1HPhotoNaming.h"
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -21,7 +23,18 @@
 #define S1H_PTP_DEVICE_BUSY 0x2019
 #define S1H_PTP_INVALID_PARAMETER 0x201d
 
-typedef void (^S1HCaptureProgress)(NSString *message);
+typedef void (^S1HCaptureProgress)(NSDictionary *update);
+
+static NSDictionary *s1h_capture_busy(NSString *phase, NSString *message) {
+    return @{@"status": @"busy", @"phase": phase, @"message": message};
+}
+
+static NSDictionary *s1h_capture_file_progress(NSUInteger fileIndex, uint32_t written, uint32_t total, BOOL verifying) {
+    NSString *message = verifying ? @"Verifying the received photo before saving." :
+        [NSString stringWithFormat:@"Downloading photo: %.1f / %.1f MB", written / 1e6, total / 1e6];
+    return @{@"status": @"busy", @"phase": verifying ? @"verifying" : @"download", @"message": message,
+        @"file_index": @(fileIndex), @"downloaded_bytes": @(written), @"total_bytes": @(total)};
+}
 
 static NSDictionary *s1h_capture_result(NSString *state, NSString *message, BOOL issued, NSArray *files) {
     BOOL complete = [state isEqualToString:@"ok"] && files.count > 0;
@@ -158,6 +171,80 @@ static NSString *s1h_capture_finalize(int directoryFD, NSString *temporary, NSSt
     }
     return nil;
 }
+
+@interface S1HCaptureNaming : NSObject
+@property(nonatomic, copy) NSString *prefix;
+@property(nonatomic) uint64_t nextNumber;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *numbersByCameraStem;
+@end
+@implementation S1HCaptureNaming
+@end
+
+static uint64_t s1h_capture_named_ordinal(NSString *name, NSString *prefix) {
+    if (!s1h_capture_name_valid(name)) return 0;
+    NSString *stem = name.stringByDeletingPathExtension.precomposedStringWithCanonicalMapping;
+    NSRange separator = [stem rangeOfString:@"_" options:NSBackwardsSearch];
+    if (separator.location == NSNotFound ||
+        [[stem substringToIndex:separator.location] caseInsensitiveCompare:prefix] != NSOrderedSame) return 0;
+    NSUInteger start = NSMaxRange(separator);
+    if (stem.length - start < 4) return 0;
+    uint64_t number = 0;
+    for (NSUInteger index = start; index < stem.length; ++index) {
+        unichar character = [stem characterAtIndex:index];
+        if (character < '0' || character > '9') return 0;
+        uint64_t digit = character - '0';
+        if (number > (UINT64_MAX - digit) / 10) return 0;
+        number = number * 10 + digit;
+    }
+    return number;
+}
+
+static S1HCaptureNaming *s1h_capture_prepare_naming(int directoryFD, NSString *prefix) {
+    if (!prefix.length) return nil;
+    int scanFD = openat(directoryFD, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (scanFD < 0) return nil;
+    DIR *scan = fdopendir(scanFD);
+    if (!scan) { close(scanFD); return nil; }
+    NSString *normalized = prefix.precomposedStringWithCanonicalMapping;
+    uint64_t highest = 0;
+    int scanError = 0;
+    while (!StopRequested) {
+        errno = 0;
+        const struct dirent *entry = readdir(scan);
+        if (!entry) { scanError = errno; break; }
+        @autoreleasepool {
+            NSString *name = [[NSString alloc] initWithUTF8String:entry->d_name];
+            uint64_t ordinal = s1h_capture_named_ordinal(name, normalized);
+            highest = MAX(highest, ordinal);
+        }
+    }
+    closedir(scan);
+    if (scanError || StopRequested || highest == UINT64_MAX) return nil;
+    S1HCaptureNaming *naming = [S1HCaptureNaming new];
+    naming.prefix = normalized;
+    naming.nextNumber = highest + 1;
+    naming.numbersByCameraStem = [NSMutableDictionary dictionary];
+    return naming;
+}
+
+static NSString *s1h_capture_finalize_named(int directoryFD, NSString *temporary, NSString *cameraName, S1HCaptureNaming *naming) {
+    if (!naming) return s1h_capture_finalize(directoryFD, temporary, cameraName);
+    NSString *stem = cameraName.stringByDeletingPathExtension.precomposedStringWithCanonicalMapping.lowercaseString;
+    NSString *extension = cameraName.pathExtension;
+    NSNumber *paired = naming.numbersByCameraStem[stem];
+    uint64_t number = paired ? paired.unsignedLongLongValue : naming.nextNumber;
+    for (unsigned collision = 0; number && collision < 10000; ++collision) {
+        NSString *name = [NSString stringWithFormat:@"%@_%04llu.%@", naming.prefix, (unsigned long long)number, extension];
+        if (renameatx_np(directoryFD, temporary.fileSystemRepresentation, directoryFD, name.fileSystemRepresentation, RENAME_EXCL) == 0) {
+            naming.numbersByCameraStem[stem] = @(number);
+            if (number >= naming.nextNumber) naming.nextNumber = number + 1;
+            return name;
+        }
+        if (errno != EEXIST || number == UINT64_MAX) return nil;
+        number = MAX(number + 1, naming.nextNumber);
+    }
+    return nil;
+}
 typedef BOOL (^S1HCaptureReadAt)(void *bytes, size_t size, uint64_t offset);
 
 static BOOL s1h_capture_pread(int fd, void *buffer, size_t size, uint64_t offset) {
@@ -279,11 +366,11 @@ static PreviewReply *s1h_capture_read_when_ready(NativePreviewTransport *transpo
 }
 
 static NSDictionary *s1h_capture_download(NativePreviewTransport *transport, uint32_t handle,
-        NSDictionary *info, int directoryFD, NSString *directory, double deadline,
-        S1HCaptureProgress progress, NSString **error) {
+        NSDictionary *info, int directoryFD, NSString *directory, S1HCaptureNaming *naming, double deadline,
+        NSUInteger fileIndex, S1HCaptureProgress progress, NSString **error) {
     uint32_t expected = [info[@"bytes"] unsignedIntValue];
     if (!s1h_capture_has_space(directoryFD, (uint64_t)expected + 1024 * 1024)) {
-        if (error) *error = @"Insufficient free space for the captured photo; the camera original remains.";
+        if (error) *error = @"Insufficient space to save the captured photo. Check the camera and free space in the download folder.";
         return nil;
     }
     NSString *temporary = [NSString stringWithFormat:@".s1h-%@.part", NSUUID.UUID.UUIDString];
@@ -292,34 +379,41 @@ static NSDictionary *s1h_capture_download(NativePreviewTransport *transport, uin
     BOOL complete = YES;
     uint32_t offset = 0;
     BOOL extended = [info[@"extended_object"] boolValue];
+    if (progress) progress(s1h_capture_file_progress(fileIndex, offset, expected, NO));
     double started = monotonic_seconds();
-    double lastProgress = 0;
+    double lastProgress = started;
+    NSString *chunkError = nil;
     while (offset < expected && !StopRequested) {
-        uint32_t count = MIN(S1H_CAPTURE_CHUNK, expected - offset);
-        NSArray *arguments = extended ? @[@(handle), @(offset), @0, @(count)] : @[@(handle), @(offset), @(count)];
-        PreviewReply *reply = s1h_capture_read_when_ready(transport, extended ? 0x9112 : 0x101b, arguments,
-                                                        MIN(deadline, monotonic_seconds() + 8.0), NO);
-        BOOL countConfirmed = reply.parameters.count == 1 && reply.parameters.firstObject.unsignedIntValue == count;
-        if (extended && !reply.parameters.count) countConfirmed = YES;
-        if (!reply || reply.code != S1H_PTP_OK || reply.data.length != count ||
-            !countConfirmed) {
-            complete = NO;
-            if (error) *error = transport.error ?: @"Photo chunk did not arrive with the requested byte count before its deadline; .part retained.";
-            break;
-        }
-        if (!s1h_capture_write_all(fd, reply.data)) {
-            complete = NO;
-            if (error) *error = @"Photo file write failed; incomplete .part file retained.";
-            break;
-        }
-        offset += count;
-        double now = monotonic_seconds();
-        if (progress && (offset == expected || now - lastProgress >= 0.25)) {
-            lastProgress = now;
-            progress([NSString stringWithFormat:@"Downloading photo: %.1f / %.1f MB", offset / 1e6, expected / 1e6]);
+        /* Release the PTP buffers after each chunk, including during XL transfers. */
+        @autoreleasepool {
+            uint32_t count = MIN(S1H_CAPTURE_CHUNK, expected - offset);
+            NSArray *arguments = extended ? @[@(handle), @(offset), @0, @(count)] : @[@(handle), @(offset), @(count)];
+            PreviewReply *reply = s1h_capture_read_when_ready(transport, extended ? 0x9112 : 0x101b, arguments,
+                                                            MIN(deadline, monotonic_seconds() + 8.0), NO);
+            BOOL countConfirmed = reply.parameters.count == 1 && reply.parameters.firstObject.unsignedIntValue == count;
+            if (extended && !reply.parameters.count) countConfirmed = YES;
+            if (!reply || reply.code != S1H_PTP_OK || reply.data.length != count ||
+                !countConfirmed) {
+                complete = NO;
+                chunkError = transport.error ?: @"Photo chunk did not arrive with the requested byte count before its deadline; .part retained.";
+                break;
+            }
+            if (!s1h_capture_write_all(fd, reply.data)) {
+                complete = NO;
+                chunkError = @"Photo file write failed; incomplete .part file retained.";
+                break;
+            }
+            offset += count;
+            double now = monotonic_seconds();
+            if (progress && (offset == expected || now - lastProgress >= 0.25)) {
+                lastProgress = now;
+                progress(s1h_capture_file_progress(fileIndex, offset, expected, NO));
+            }
         }
     }
-    if (StopRequested) { complete = NO; if (error) *error = @"Photo download cancelled; camera original and partial download retained."; }
+    if (chunkError && error) *error = chunkError;
+    if (complete && !StopRequested && progress) progress(s1h_capture_file_progress(fileIndex, offset, expected, YES));
+    if (StopRequested) complete = NO;
     struct stat written;
     NSDictionary *fileInfo = nil;
     if (complete) {
@@ -332,8 +426,12 @@ static NSDictionary *s1h_capture_download(NativePreviewTransport *transport, uin
         }
     }
     close(fd);
+    if (StopRequested) {
+        if (error) *error = @"Photo download cancelled. The .part file was retained.";
+        return nil;
+    }
     if (!complete) return nil;
-    NSString *final = s1h_capture_finalize(directoryFD, temporary, info[@"name"]);
+    NSString *final = s1h_capture_finalize_named(directoryFD, temporary, info[@"name"], naming);
     if (!final) { if (error) *error = @"Could not finalize the new photo without overwriting an existing file; .part retained."; return nil; }
     NSMutableDictionary *saved = [info mutableCopy];
     [saved addEntriesFromDictionary:fileInfo];
@@ -417,15 +515,15 @@ static BOOL s1h_capture_queue_handles(NSArray<NSNumber *> *handles, NSMutableSet
 
 static NSDictionary *s1h_capture_receive(NativePreviewTransport *transport, int directoryFD, NSString *directory,
         NSArray<NSNumber *> *before, BOOL eventOnly, uint32_t captureTransaction, NSDictionary *firstEvent,
-        S1HCaptureProgress progress) {
+        S1HCaptureNaming *naming, S1HCaptureProgress progress) {
     NSMutableArray *files = [NSMutableArray array];
     NSString *error = nil;
     BOOL hostShutter = firstEvent == nil;
     /* Handles are deduplicated for one receive group. The S1H can allocate
      * the same SDRAM handle to a later photograph. */
     NSMutableSet<NSNumber *> *seen = [NSMutableSet setWithArray:before ?: @[]];
-    if (progress) progress(hostShutter ? @"Waiting for the camera to finish the capture." :
-                                        @"Receiving a photograph taken on the camera.");
+    if (progress) progress(s1h_capture_busy(@"waiting", hostShutter ? @"Waiting for the camera to finish the capture." :
+        @"Receiving a photograph taken on the camera."));
     double started = monotonic_seconds();
     double objectDeadline = started + 120.0, deadline = started + 240.0;
     double quietDeadline = 0, nextInventory = started + 0.75;
@@ -524,7 +622,7 @@ static NSDictionary *s1h_capture_receive(NativePreviewTransport *transport, int 
             }
             if (![info[@"association"] boolValue]) {
                 NSDictionary *saved = s1h_capture_download(transport, handle.unsignedIntValue, info, directoryFD,
-                                                          directory, deadline, progress, &error);
+                                                          directory, naming, deadline, files.count + 1, progress, &error);
                 if (saved) [files addObject:saved];
                 if (!saved || error) break;
                 savedHandle = handle;
@@ -542,19 +640,32 @@ static NSDictionary *s1h_capture_receive(NativePreviewTransport *transport, int 
     return s1h_capture_result(@"ok", [NSString stringWithFormat:@"Saved %lu photo file(s) to the Mac.", (unsigned long)files.count], hostShutter, files);
 }
 
-static NSDictionary *s1h_capture_once(NativePreviewTransport *transport, NSString *requestedDirectory, S1HCaptureProgress progress) {
+static NSDictionary *s1h_capture_once(NativePreviewTransport *transport, NSString *requestedDirectory,
+        NSString *prefix, S1HCaptureProgress progress) {
     NSString *error = nil, *directory = nil;
     if (!transport.synchronized) return s1h_capture_result(@"rejected", @"Camera session is not synchronized; no photo was requested.", NO, @[]);
     phase_deadline(8);
     int directoryFD = s1h_capture_directory(requestedDirectory, &directory, &error);
     if (directoryFD < 0) return s1h_capture_result(@"rejected", error, NO, @[]);
+    S1HCaptureNaming *naming = s1h_capture_prepare_naming(directoryFD, prefix);
+    if (prefix.length && !naming) {
+        close(directoryFD);
+        return s1h_capture_result(@"rejected", @"Could not start photo numbering in the destination. No photo requested.", NO, @[]);
+    }
     double previousBudget = transport.transactionBudget;
-    if (progress) progress(@"Checking the camera before capture.");
-    /* Require a bounded empty interrupt queue before requesting a new shot. */
+    if (progress) progress(s1h_capture_busy(@"preparing", @"Checking the camera before capture."));
+    /* A body shutter can arrive after the preview loop's last event poll.
+     * Receive it before allowing another shutter, especially for PC-only RAW. */
     BOOL drained = NO;
     for (unsigned i = 0; i < 64 && !StopRequested; ++i) {
         NSDictionary *event = [transport readCaptureEvent:0.05 error:&error];
         if (!event) { drained = error == nil; break; }
+        if (s1h_camera_event_starts_transfer(event)) {
+            NSDictionary *result = s1h_capture_receive(transport, directoryFD, directory, nil, YES,
+                [event[@"transaction"] unsignedIntValue], event, naming, progress);
+            close(directoryFD); transport.transactionBudget = previousBudget;
+            return result;
+        }
     }
     if (!drained || StopRequested) {
         close(directoryFD); transport.transactionBudget = previousBudget;
@@ -568,7 +679,7 @@ static NSDictionary *s1h_capture_once(NativePreviewTransport *transport, NSStrin
             error ?: @"The camera is busy; no photograph was requested.";
         return s1h_capture_result(@"rejected", message, NO, @[]);
     }
-    if (progress) progress(@"Taking one photograph.");
+    if (progress) progress(s1h_capture_busy(@"shutter", @"Taking one photograph."));
     if (StopRequested) {
         close(directoryFD); transport.transactionBudget = previousBudget;
         return s1h_capture_result(@"rejected", @"Cancelled before requesting a photograph.", NO, @[]);
@@ -581,7 +692,7 @@ static NSDictionary *s1h_capture_once(NativePreviewTransport *transport, NSStrin
     transport.responseTimeout = previousResponseTimeout;
     NSDictionary *result;
     if (capture && capture.code == S1H_PTP_OK) {
-        result = s1h_capture_receive(transport, directoryFD, directory, before, eventOnly, captureTransaction, nil, progress);
+        result = s1h_capture_receive(transport, directoryFD, directory, before, eventOnly, captureTransaction, nil, naming, progress);
     } else if (capture && capture.code == S1H_PTP_STORE_NOT_AVAILABLE) {
         result = s1h_capture_result(@"rejected", @"The camera reported its photo storage is unavailable (0x2013). Check the camera's capture destination and storage card.", YES, @[]);
     } else if (capture && (capture.code == S1H_PTP_DEVICE_BUSY || capture.code == S1H_PTP_UNSUPPORTED)) {
@@ -597,7 +708,7 @@ static NSDictionary *s1h_capture_once(NativePreviewTransport *transport, NSStrin
 }
 
 static NSDictionary *s1h_capture_from_camera_event(NativePreviewTransport *transport, NSString *requestedDirectory,
-        NSDictionary *event, S1HCaptureProgress progress) {
+        NSString *prefix, NSDictionary *event, S1HCaptureProgress progress) {
     if (!s1h_camera_event_starts_transfer(event))
         return s1h_capture_result(@"rejected", @"The event did not identify a captured photo.", NO, @[]);
     if (!transport.synchronized || StopRequested)
@@ -606,9 +717,14 @@ static NSDictionary *s1h_capture_from_camera_event(NativePreviewTransport *trans
     phase_deadline(8);
     int directoryFD = s1h_capture_directory(requestedDirectory, &directory, &error);
     if (directoryFD < 0) return s1h_capture_result(@"error", error, NO, @[]);
+    S1HCaptureNaming *naming = s1h_capture_prepare_naming(directoryFD, prefix);
+    if (prefix.length && !naming) {
+        close(directoryFD);
+        return s1h_capture_result(@"error", @"Could not start photo numbering in the destination. Check the camera and save folder.", NO, @[]);
+    }
     double previousBudget = transport.transactionBudget;
     NSDictionary *result = s1h_capture_receive(transport, directoryFD, directory, nil, YES,
-        [event[@"transaction"] unsignedIntValue], event, progress);
+        [event[@"transaction"] unsignedIntValue], event, naming, progress);
     close(directoryFD); transport.transactionBudget = previousBudget;
     return result;
 }
@@ -649,6 +765,21 @@ static BOOL s1h_capture_self_test(void) {
     CAPTURE_CHECK(!s1h_capture_name_valid(@"../photo.RW2") && !s1h_capture_name_valid(@"folder/photo.RW2") &&
                   !s1h_capture_name_valid(@"photo:1.RW2") && !s1h_capture_name_valid(@"photo\n.RW2") &&
                   !s1h_capture_name_valid(@"video.MOV"), "Path traversal, control characters and unsupported media are rejected");
+    CAPTURE_CHECK(s1h_photo_prefix_valid(@"") && s1h_photo_prefix_valid(@"底片 2026") && s1h_photo_prefix_valid(@"Series_1") &&
+                  !s1h_photo_prefix_valid(@"../escape") && !s1h_photo_prefix_valid(@"My:Photo") &&
+                  !s1h_photo_prefix_valid(@"My\\Photo") && !s1h_photo_prefix_valid(@"My\nPhoto") &&
+                  !s1h_photo_prefix_valid(@"My\u2028Photo") && !s1h_photo_prefix_valid(@"My\u2029Photo") &&
+                  !s1h_photo_prefix_valid(@"Leading. ") && !s1h_photo_prefix_valid(@".hidden") &&
+                  !s1h_photo_prefix_valid([@"" stringByPaddingToLength:121 withString:@"X" startingAtIndex:0]),
+                  "Optional user prefix accepts Unicode and rejects unsafe or oversized names");
+    CAPTURE_CHECK(s1h_capture_named_ordinal(@"Film_A_0012.RW2", @"film_a") == 12 &&
+                  s1h_capture_named_ordinal(@"底片_10000.jpeg", @"底片") == 10000 &&
+                  s1h_capture_named_ordinal(@"Cafe\u0301_0002.JPG", @"Café") == 2 &&
+                  s1h_capture_named_ordinal(@"Film_A_0013.MOV", @"film_a") == 0 &&
+                  s1h_capture_named_ordinal(@"Film_A_001x.JPG", @"film_a") == 0 &&
+                  s1h_capture_named_ordinal(@"Other_Film_A_0012.RW2", @"film_a") == 0 &&
+                  s1h_capture_named_ordinal(@"Film_A_18446744073709551616.JPG", @"film_a") == 0,
+                  "Numbering scans matching RAW and JPEG names with exact prefixes, case folding and overflow checks");
     NSMutableData *info = [NSMutableData dataWithLength:52];
     unsigned char *bytes = info.mutableBytes;
     write32(bytes, 0x10001); write16(bytes + 4, 0xb103); write32(bytes + 8, 36093440);
@@ -710,7 +841,7 @@ static BOOL s1h_capture_self_test(void) {
     eventTransport.synchronized = YES;
     eventTransport.fixtureRequests = [NSMutableArray array];
     NSDictionary *eventResult = s1h_capture_receive(eventTransport, -1, @"", nil, YES, UINT32_MAX,
-        @{@"code":@0xc109, @"transaction":@(UINT32_MAX), @"parameters":@[@0x12345678]}, nil);
+        @{@"code":@0xc109, @"transaction":@(UINT32_MAX), @"parameters":@[@0x12345678]}, nil, nil);
     CAPTURE_CHECK((eventTransport.fixtureEventReads == 0 &&
         [eventTransport.fixtureRequests isEqual:@[@[@0x9110, @[@0x12345678], @YES]]] &&
         [eventResult[@"status"] isEqual:@"error"] && ![eventResult[@"capture_issued"] boolValue] &&
