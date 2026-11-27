@@ -4,7 +4,7 @@
 
 [English](https://github.com/easonzhangbin/lumix-tether-macos-fix/blob/main/docs/CLI.md)
 
-CLI 以[仓库源码](https://github.com/easonzhangbin/lumix-tether-macos-fix/tree/main)保留，不再提供旧版下载；请按下方[从源码构建](#从源码构建)使用。二进制发布仅保留当前 [Guardian 0.2.4 测试版](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4)，其应用包与本页 CLI 流程分开。
+如需使用 CLI，请按下方[从源码构建](#从源码构建)的步骤操作。菜单栏应用的安装包见[当前 Guardian 测试版](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5)。
 
 通过 `.command` 脚本运行的小型 Apple Silicon USB 恢复工具：先清理未读完的 PTP 响应，再打开松下 LUMIX Tether 2.12。已在一套 Panasonic DC-S1H 环境上恢复 USB2、USB3 联机连接，并验证 Tether 实时预览正常。
 

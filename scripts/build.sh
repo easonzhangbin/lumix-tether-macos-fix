@@ -31,7 +31,7 @@ while (( $# )); do
     esac
 done
 [[ "$(/usr/bin/uname -s)" == Darwin ]] || die 'macOS and Apple developer tools are required.'
-for required_path in src/s1h_iousbhost_probe.m src/s1h_camera_service.m 恢复S1H连接.command 重启相机服务并恢复连接.command README.md README.zh-CN.md LICENSE; do
+for required_path in src/s1h_iousbhost_probe.m src/s1h_camera_service.m VERSION 恢复S1H连接.command 重启相机服务并恢复连接.command README.md README.zh-CN.md LICENSE; do
     [[ -f "${PROJECT_ROOT}/${required_path}" ]] || die "Missing ${required_path}."
 done
 /bin/zsh -n "${PROJECT_ROOT}/恢复S1H连接.command"
@@ -79,6 +79,7 @@ for document_name in README.md README.zh-CN.md LICENSE CONTRIBUTING.md docs/TECH
         fi
     fi
 done
+/usr/bin/ditto --norsrc --noextattr --noacl "${PROJECT_ROOT}/VERSION" "${STAGED_RELEASE}/VERSION"
 /usr/bin/ditto --norsrc --noextattr --noacl \
     "${PROJECT_ROOT}/恢复S1H连接.command" "${STAGED_RELEASE}/恢复S1H连接.command"
 # Same source, ordinary file: no symlink and no dependency on shell wrappers.

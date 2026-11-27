@@ -28,4 +28,4 @@ jobs:
       - name: Package Guardian beta and verify an independent extraction
         run: ./experiments/connection-guardian/package.sh
       - name: Package and verify an independent extraction
-        run: ./scripts/package.sh --version 1.0.2
+        run: ./scripts/package.sh

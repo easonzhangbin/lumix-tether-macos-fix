@@ -1,5 +1,7 @@
 #import "GuardianController.h"
+#import "GuardianDiagnosticCapture.h"
 #import "GuardianEventLog.h"
+#import "GuardianRAWArrival.h"
 #import <AppKit/AppKit.h>
 #import <Security/Security.h>
 #include <libproc.h>
@@ -8,6 +10,7 @@
 #include <math.h>
 
 static NSString *const GuardianBundleID = @"isb-152.LUMIXTether";
+static const double GuardianRAWDeadline = 30.0;
 static double GuardianNow(void) { return NSProcessInfo.processInfo.systemUptime; }
 static BOOL GuardianIdentityShape(NSDictionary *identity) {
     if(![identity isKindOfClass:NSDictionary.class]) return NO;
@@ -47,25 +50,8 @@ static BOOL GuardianForceModeAllowed(BOOL ending, BOOL requestedEnding, BOOL can
     return canForce && quitPending && ending==requestedEnding &&
         requestedEnding==[purpose isEqual:@"end"];
 }
-static NSDictionary *GuardianSafeEventFields(NSDictionary *fields) {
-    if(![fields isKindOfClass:NSDictionary.class]) return @{};
-    NSSet *strings=[NSSet setWithArray:@[@"source",@"request_source",@"result",@"reason",@"state",@"previous_state",
-        @"helper_kind",@"purpose",@"quit_purpose",@"phase",@"trigger",@"mode",@"app_version",@"attempt_id",
-        @"launch_attempt_id",@"helper_attempt_id",@"session_id",@"correlation_id",@"observation",@"verification",@"error_domain",@"blocking_app"]];
-    NSSet *numbers=[NSSet setWithArray:@[@"pid",@"tether_pid",@"previous_pid",@"start_seconds",@"start_microseconds",
-        @"exit_status",@"error_code",@"generation",@"retry_count",@"duration_ms",@"usb_link_speed_bps",@"device_count",
-        @"interface_count",@"expired",@"initial",@"verified",@"success",@"accepted",@"desired_running",@"ending_session",
-        @"session_ended",@"tether_running",@"stopping",@"busy",@"normal_quit_delivered",@"already_running",@"observed",@"blocking_app_count"]];
-    NSCharacterSet *unsafe=[[NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-"] invertedSet];
-    NSMutableDictionary *safe=[NSMutableDictionary dictionary];
-    for(NSString *key in fields) {
-        id value=fields[key];
-        if([strings containsObject:key] && [value isKindOfClass:NSString.class] && [value length]>0 && [value length]<=128 &&
-            [value rangeOfCharacterFromSet:unsafe].location==NSNotFound) safe[key]=value;
-        else if([numbers containsObject:key] && [value isKindOfClass:NSNumber.class] && isfinite([value doubleValue])) safe[key]=value;
-    }
-    return safe;
-}
+/* Field filtering lives only in GuardianEventLog; the controller passes raw
+ * fields so the two allowlists can never drift apart. */
 static NSDictionary *GuardianSafeIdentityFields(NSDictionary *identity) {
     if(!GuardianIdentityShape(identity)) return @{};
     return @{@"pid":identity[@"pid"],@"start_seconds":identity[@"start_seconds"],@"start_microseconds":identity[@"start_microseconds"]};
@@ -310,6 +296,20 @@ static NSString *GuardianLanguage(void) {
 @property(nonatomic,copy) NSString *state;
 @property(nonatomic,copy) NSString *messageZH;
 @property(nonatomic,copy) NSString *messageEN;
+@property(nonatomic,strong) dispatch_queue_t diagnosticQueue;
+@property(nonatomic,strong) GuardianRAWArrival *diagnosticWatch;
+@property(nonatomic,copy) NSString *diagnosticAttempt;
+@property(nonatomic,copy) NSString *diagnosticState;
+@property(nonatomic,copy) NSString *diagnosticMessageZH;
+@property(nonatomic,copy) NSString *diagnosticMessageEN;
+@property(nonatomic,copy) NSString *diagnosticDirectory;
+@property(nonatomic,copy) NSDictionary *diagnosticTetherIdentity;
+@property(nonatomic,copy) NSDictionary *diagnosticCameraServiceIdentity;
+@property(nonatomic) uint64_t diagnosticInterfaceID;
+@property(nonatomic) double diagnosticDeadline;
+- (BOOL)canBeginDiagnostic;
+- (void)pollDiagnostic:(NSString *)attempt;
+- (void)collectDiagnosticForReason:(NSString *)reason;
 - (void)advanceEndSession;
 - (void)receiveLaunchResult:(NSDictionary *)verifiedIdentity success:(BOOL)success generation:(uint64_t)generation;
 - (void)recordEvent:(NSString *)event fields:(NSDictionary *)fields;
@@ -323,6 +323,7 @@ static NSString *GuardianLanguage(void) {
     if ((self=[super init])) {
         _resources=directory; _onUpdate=[onUpdate copy];
         _queue=dispatch_queue_create("local.s1h.connection-guardian.state",DISPATCH_QUEUE_SERIAL);
+        _diagnosticQueue=dispatch_queue_create("local.s1h.connection-guardian.diagnostic",DISPATCH_QUEUE_SERIAL);
         _stopCompletions=[NSMutableArray array]; _state=@"idle";
         _messageZH=@"已暂停。点击“开始守护”后自动准备相机连接。";
         _messageEN=@"Paused. Choose Start Guardian to prepare camera connections automatically.";
@@ -340,12 +341,12 @@ static NSString *GuardianLanguage(void) {
 }
 - (void)dealloc { if (_timer) dispatch_source_cancel(_timer); }
 - (void)recordEvent:(NSString *)event fields:(NSDictionary *)fields {
-    NSMutableDictionary *safe=[GuardianSafeEventFields(fields ?: @{}) mutableCopy];
-    if([event hasPrefix:@"user_"] && !safe[@"phase"]) safe[@"phase"]=@"requested";
-    if(!safe[@"generation"]) safe[@"generation"]=@(self.generation);
-    safe[@"desired_running"]=@(self.desired);
-    safe[@"ending_session"]=@(self.endingSession); safe[@"stopping"]=@(self.stopping);
-    [self.eventLog recordEvent:event fields:safe];
+    NSMutableDictionary *eventFields=[fields isKindOfClass:NSDictionary.class] ? [fields mutableCopy] : [NSMutableDictionary dictionary];
+    if([event hasPrefix:@"user_"] && !eventFields[@"phase"]) eventFields[@"phase"]=@"requested";
+    if(!eventFields[@"generation"]) eventFields[@"generation"]=@(self.generation);
+    eventFields[@"desired_running"]=@(self.desired);
+    eventFields[@"ending_session"]=@(self.endingSession); eventFields[@"stopping"]=@(self.stopping);
+    [self.eventLog recordEvent:event fields:eventFields];
 }
 - (void)observeTetherPresence:(BOOL)present observationValid:(BOOL)valid identity:(NSDictionary *)identity {
     self.tetherObservationValid=valid;
@@ -400,7 +401,10 @@ static NSString *GuardianLanguage(void) {
         @"external_interface_owner":@((BOOL)(foreignOwner!=nil)),@"external_interface_owner_info":foreignOwner ?: @{},
         @"capture_state":GuardianCaptureState(processValid,self.tetherRunning),@"shooting_verified":@NO,
         @"busy":@((BOOL)(self.task || self.quitRequested || self.launching || self.endingSession)),
+        @"diagnostic_state":self.diagnosticState ?: @"idle",@"diagnostic_can_begin":@([self canBeginDiagnostic]),
+        @"diagnostic_message_zh":self.diagnosticMessageZH ?: @"",@"diagnostic_message_en":self.diagnosticMessageEN ?: @"",
         @"retry_count":@(self.retryCount),@"log_directory":self.logDirectory} mutableCopy];
+    if(self.diagnosticDirectory) snapshot[@"diagnostic_directory"]=self.diagnosticDirectory;
     if (self.inspection) snapshot[@"inspection"]=self.inspection;
     NSNumber *speed=self.inspection[@"usb_link_speed_bps"];
     if ([speed isKindOfClass:NSNumber.class]) snapshot[@"usb_link_speed_bps"]=speed;
@@ -469,7 +473,7 @@ static NSString *GuardianLanguage(void) {
 }
 - (NSURL *)helper:(NSString *)name { return [self.resources URLByAppendingPathComponent:name]; }
 - (void)finishStoppingIfPossible {
-    if (!self.stopping || self.task || self.launching) return;
+    if (!self.stopping || self.task || self.launching || [self.diagnosticState isEqual:@"collecting"]) return;
     if (self.timer) { dispatch_source_cancel(self.timer); self.timer=nil; }
     [self publish:@"stopped"
         zh:self.normalQuitDelivered ? @"守护工具已停止；此前发给 Tether 的退出请求无法撤回。" : @"守护工具已停止；Tether 保持当前状态。"
@@ -758,6 +762,9 @@ static NSString *GuardianLanguage(void) {
         [inspection[@"s1h_interface_count"] unsignedIntegerValue]==1 && [inspection[@"interface_registry_id"] unsignedLongLongValue]>0;
     BOOL confirmedAbsent=[inspection[@"matching_usb_id_device_count"] isKindOfClass:NSNumber.class] &&
         [inspection[@"matching_usb_id_device_count"] unsignedIntegerValue]==0;
+    if([self.diagnosticState isEqual:@"waiting"] &&
+        (confirmedAbsent || (knownPresent && [inspection[@"interface_registry_id"] unsignedLongLongValue]!=self.diagnosticInterfaceID)))
+        [self collectDiagnosticForReason:@"usb_changed"];
     if(knownPresent) {
         uint64_t registry=[inspection[@"interface_registry_id"] unsignedLongLongValue];
         if(!self.devicePresent || registry!=self.interfaceID) {
@@ -795,7 +802,7 @@ static NSString *GuardianLanguage(void) {
     else [self publish:@"waiting" zh:@"正在等待稳定的相机连接…" en:@"Waiting for a stable camera connection…"];
 }
 - (void)requestTetherQuit:(NSString *)purpose {
-    if(self.stopping || self.task || self.launching || self.quitRequested) return;
+    if(self.stopping || self.diagnosticState || self.task || self.launching || self.quitRequested) return;
     BOOL reliable=NO; NSArray<NSNumber *> *pids=GuardianTetherPIDs(&reliable);
     if(!reliable || pids.count!=1) { [self publish:[purpose isEqual:@"end"] ? @"end_needs_attention" : @"needs_attention" zh:@"无法唯一确认官方 Tether，请先手动退出相机软件。" en:@"Official Tether could not be identified uniquely. Quit camera applications manually."]; return; }
     NSDictionary *identity=GuardianProcessIdentity(pids.firstObject.intValue); NSRunningApplication *app=nil;
@@ -852,6 +859,9 @@ static NSString *GuardianLanguage(void) {
 - (void)tick {
     if(self.stopping) { [self finishStoppingIfPossible]; return; }
     BOOL absent=[self tetherAbsent];
+    if([self.diagnosticState isEqual:@"waiting"] && self.tetherObservationValid &&
+        (absent || !GuardianSameIdentity(self.diagnosticTetherIdentity,self.observedProcessIdentity)))
+        [self collectDiagnosticForReason:@"tether_changed"];
     [self publishObservationFreshnessIfNeeded];
     if(self.task && ![self.taskKind isEqual:@"inspect"] && !absent) self.sawTetherDuringHelper=YES;
     if(self.previousTetherRunning && absent && self.desired && !self.quitRequested) {
@@ -892,6 +902,7 @@ static NSString *GuardianLanguage(void) {
 }
 - (void)start {
     dispatch_async(self.queue,^{ if(self.stopping) return;
+        if(self.diagnosticState) { [self republish]; return; }
         [self recordEvent:@"user_start" fields:@{@"accepted":@(!self.endingSession)}];
         if(self.endingSession) { [self republish]; return; }
         self.recoverySource=@"afterStartRecovery";
@@ -901,7 +912,8 @@ static NSString *GuardianLanguage(void) {
         [self publish:@"starting" zh:@"守护已开始，正在只读检查连接状态。" en:@"Guardian started; checking connection state read-only."]; [self tick]; });
 }
 - (void)pause {
-    dispatch_async(self.queue,^{ ++self.generation; self.desired=NO; self.pendingRecovery=NO; self.canForce=NO;
+    dispatch_async(self.queue,^{ if(self.diagnosticState) { [self republish]; return; }
+        ++self.generation; self.desired=NO; self.pendingRecovery=NO; self.canForce=NO;
         [self recordEvent:@"user_pause" fields:@{@"normal_quit_delivered":@(self.normalQuitDelivered)}];
         self.endingSession=NO; self.endQuitAttempted=NO;
         self.quitRequested=NO; self.quitIdentity=nil; self.quitPurpose=nil;
@@ -914,6 +926,7 @@ static NSString *GuardianLanguage(void) {
 - (void)endSession {
     dispatch_async(self.queue,^{
         if(self.stopping) return;
+        if(self.diagnosticState) { [self republish]; return; }
         /* First revoke recovery/launch consent. A helper already owning a
          * session is allowed to finish; none of its old results can restart
          * Tether. No new normal-quit target is selected after one attempt. */
@@ -932,6 +945,7 @@ static NSString *GuardianLanguage(void) {
 }
 - (void)reconnect {
     dispatch_async(self.queue,^{ if(self.stopping) return;
+        if(self.diagnosticState) { [self republish]; return; }
         [self recordEvent:@"user_reconnect" fields:@{@"accepted":@(!self.endingSession && !self.task && !self.launching)}];
         if(self.endingSession) { [self republish]; return; }
         if(self.task || self.launching) { [self publish:@"busy" zh:@"当前准备尚未完成，请稍后再重新连接。" en:@"Preparation is still finishing. Choose Reconnect afterward."]; return; }
@@ -949,6 +963,7 @@ static NSString *GuardianLanguage(void) {
 }
 - (void)forceTetherForEnding:(BOOL)ending {
     dispatch_async(self.queue,^{
+        if(self.diagnosticState) { [self republish]; return; }
         [self recordEvent:ending ? @"user_force_quit" : @"user_force_restart" fields:@{@"accepted":@(!self.stopping && !self.task && !self.launching &&
             GuardianForceModeAllowed(self.endingSession,ending,self.canForce,self.quitRequested,self.quitPurpose))}];
         if(self.stopping || self.task || self.launching ||
@@ -978,6 +993,7 @@ static NSString *GuardianLanguage(void) {
 }
 - (void)openTether {
     dispatch_async(self.queue,^{ if(self.stopping) return;
+        if(self.diagnosticState) { [self republish]; return; }
         [self recordEvent:@"user_open_tether" fields:@{@"accepted":@(!self.endingSession && !self.task && !self.quitRequested && !self.launching)}];
         if(self.endingSession) { [self republish]; return; }
         if(self.task || self.quitRequested || self.launching) { [self publish:@"busy" zh:@"当前准备尚未完成，请稍后打开 Tether。" en:@"Preparation is still finishing. Open Tether afterward."]; return; }
@@ -994,6 +1010,128 @@ static NSString *GuardianLanguage(void) {
         if(!absent) [self publishRecoveryGate:@"process_observation_unknown"];
         else [self publish:@"starting" zh:@"正在检查连接；只有完成安全检查和 USB 准备后才会打开 Tether。" en:@"Checking the connection. Tether will open only after safety checks and USB preparation succeed."];
         [self tick];
+    });
+}
+- (BOOL)canBeginDiagnostic {
+    double now=GuardianNow();
+    return !self.stopping && !self.diagnosticState && !self.launching && !self.endingSession && !self.quitRequested &&
+        (!self.task || [self.taskKind isEqual:@"inspect"]) && self.tetherRunning && self.devicePresent &&
+        GuardianIdentityShape(self.observedProcessIdentity) &&
+        GuardianObservationFresh(self.tetherObservationValid,self.tetherObservedAt,now,2.0) &&
+        GuardianObservationFresh(self.inspectionObservationValid,self.inspectionObservedAt,now,4.0);
+}
+- (void)setDiagnosticState:(NSString *)state zh:(NSString *)zh en:(NSString *)en {
+    self.diagnosticState=state; self.diagnosticMessageZH=zh; self.diagnosticMessageEN=en;
+    [self republish];
+}
+- (void)beginHighResolutionDiagnosticAtDirectory:(NSURL *)directory {
+    dispatch_async(self.queue,^{
+        if(self.stopping || self.diagnosticState) return;
+        /* A stale UI cannot arm over a previously queued quit or launch. */
+        if(!directory.isFileURL || ![self canBeginDiagnostic]) {
+            self.diagnosticMessageZH=@"请先确认 S1H 已在 Tether 中连接，且没有正在执行的退出或恢复。";
+            self.diagnosticMessageEN=@"Connect the S1H in Tether and wait for any quit or recovery to finish before arming.";
+            [self republish]; return;
+        }
+        ++self.generation;
+        self.desired=NO; self.pendingRecovery=NO; self.canForce=NO;
+        NSString *attempt=NSUUID.UUID.UUIDString;
+        self.diagnosticAttempt=attempt; self.diagnosticDirectory=nil;
+        NSDictionary *candidate=self.observedProcessIdentity;
+        NSDictionary *owner=[self.inspection[@"owner_process"] isKindOfClass:NSDictionary.class] ? self.inspection[@"owner_process"] : nil;
+        self.diagnosticCameraServiceIdentity=[self.inspection[@"owner_state"] isEqual:@"confirmed"] &&
+            [owner[@"executable"] isEqual:@"/usr/libexec/ptpcamerad"] && [owner[@"pid"] isEqual:self.inspection[@"owner_pid"]] ? owner : nil;
+        uint64_t interfaceID=self.interfaceID;
+        self.diagnosticInterfaceID=interfaceID;
+        [self setDiagnosticState:@"arming" zh:@"正在核对 Tether 和保存目录。自动恢复已暂停，请等到就绪再拍。"
+            en:@"Checking Tether and the destination. Recovery is paused. Wait until the watch is ready before shooting."];
+        dispatch_async(self.diagnosticQueue,^{
+            BOOL reliable=NO;
+            NSArray<NSNumber *> *pids=GuardianTetherPIDs(&reliable);
+            BOOL verified=reliable && pids.count==1 && [pids.firstObject isEqual:candidate[@"pid"]] && GuardianValidRunningTether(candidate,NULL);
+            GuardianRAWArrival *watch=verified ? [[GuardianRAWArrival alloc] initWithDirectory:directory error:NULL] : nil;
+            dispatch_async(self.queue,^{
+                if(self.stopping || ![self.diagnosticAttempt isEqual:attempt] || ![self.diagnosticState isEqual:@"arming"]) return;
+                BOOL sessionChanged=!self.tetherObservationValid || !self.inspectionObservationValid ||
+                    !self.devicePresent || self.interfaceID!=interfaceID || !self.tetherRunning ||
+                    !GuardianSameIdentity(candidate,self.observedProcessIdentity);
+                if(!watch || sessionChanged) {
+                    [self recordEvent:@"diagnostic_arm_failed" fields:@{@"attempt_id":attempt,@"reason":!verified ? @"tether_unverified" : sessionChanged ? @"session_changed" : @"folder_unreadable"}];
+                    [self setDiagnosticState:@"held" zh:!verified || sessionChanged ? @"启动诊断时无法确认原联机会话。自动恢复保持暂停。" : @"无法检查所选保存目录。退出诊断后可重新选择。"
+                        en:!verified || sessionChanged ? @"The original tether session could not be verified. Recovery remains paused." : @"The selected folder could not be checked. End the diagnostic and select it again."];
+                    return;
+                }
+                self.diagnosticTetherIdentity=candidate; self.diagnosticWatch=watch;
+                self.diagnosticDeadline=GuardianNow()+GuardianRAWDeadline;
+                [self recordEvent:@"diagnostic_armed" fields:@{@"attempt_id":attempt,@"tether_pid":candidate[@"pid"]}];
+                [self setDiagnosticState:@"waiting" zh:@"诊断已就绪。现在拍一张摇摇乐 XL。30 秒内没有收到完整 RAW 就保存现场。"
+                    en:@"Watch ready. Take one XL high-resolution shot now. If a complete RAW does not arrive in 30 seconds, evidence will be saved."];
+                [self pollDiagnostic:attempt];
+            });
+        });
+    });
+}
+- (void)pollDiagnostic:(NSString *)attempt {
+    if(self.stopping || ![self.diagnosticAttempt isEqual:attempt] || ![self.diagnosticState isEqual:@"waiting"]) return;
+    GuardianRAWArrival *watch=self.diagnosticWatch;
+    dispatch_async(self.diagnosticQueue,^{
+        NSError *error=nil;
+        GuardianRAWArrivalResult *arrival=[watch checkForArrivalWithError:&error];
+        dispatch_async(self.queue,^{
+            if(self.stopping || ![self.diagnosticAttempt isEqual:attempt] || ![self.diagnosticState isEqual:@"waiting"]) return;
+            if(arrival) {
+                self.diagnosticWatch=nil;
+                [self recordEvent:@"diagnostic_raw_arrived" fields:@{@"attempt_id":attempt,@"success":@YES}];
+                [self setDiagnosticState:@"held" zh:@"已收到一张完整的摇摇乐 XL RAW。自动恢复保持暂停。"
+                    en:@"One complete XL high-resolution RAW arrived. Recovery remains paused."];
+            } else if(error || GuardianNow()>=self.diagnosticDeadline) {
+                [self collectDiagnosticForReason:error ? @"folder_check_failed" : @"raw_timeout"];
+            } else {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC),self.queue,^{ [self pollDiagnostic:attempt]; });
+            }
+        });
+    });
+}
+- (NSDictionary *)captureDiagnosticEvidenceAtRoot:(NSURL *)root tether:(NSDictionary *)tether service:(NSDictionary *)service {
+    return GuardianCaptureDiagnostics(root,tether,service);
+}
+- (void)collectDiagnosticForReason:(NSString *)reason {
+    if(self.stopping || ![self.diagnosticState isEqual:@"waiting"]) return;
+    NSString *attempt=self.diagnosticAttempt;
+    NSDictionary *tether=self.diagnosticTetherIdentity, *service=self.diagnosticCameraServiceIdentity;
+    NSURL *root=[NSURL fileURLWithPath:self.logDirectory isDirectory:YES];
+    self.diagnosticWatch=nil;
+    [self recordEvent:@"diagnostic_collecting" fields:@{@"attempt_id":attempt,@"reason":reason}];
+    [self setDiagnosticState:@"collecting" zh:@"正在保存日志和线程状态。联机会话保持现状。"
+        en:@"Saving logs and thread samples. Leaving the tether session as it is."];
+    dispatch_async(self.diagnosticQueue,^{
+        [self.eventLog flush];
+        NSDictionary *result=[self captureDiagnosticEvidenceAtRoot:root tether:tether service:service];
+        dispatch_async(self.queue,^{
+            if(![self.diagnosticAttempt isEqual:attempt]) return;
+            NSURL *saved=[result[@"directory"] isKindOfClass:NSURL.class] ? result[@"directory"] : nil;
+            self.diagnosticDirectory=saved.path;
+            BOOL complete=[result[@"status"] isEqual:@"complete"];
+            [self recordEvent:@"diagnostic_finished" fields:@{@"attempt_id":attempt,@"reason":reason,@"success":@(complete),
+                @"result":complete ? @"complete" : saved ? @"partial" : @"failed"}];
+            [self setDiagnosticState:@"held"
+                zh:complete ? @"诊断已保存。自动恢复保持暂停，请先查看诊断文件夹。" : saved ? @"已保存部分诊断。有些进程或日志无法读取，详见诊断文件夹。" : @"未能保存诊断文件。自动恢复保持暂停。"
+                en:complete ? @"Evidence saved. Recovery remains paused. Open the diagnostic folder to review it." : saved ? @"Partial evidence saved. Some processes or logs could not be read. See the diagnostic folder." : @"Evidence could not be saved. Recovery remains paused."];
+            [self finishStoppingIfPossible];
+        });
+    });
+}
+- (void)captureHighResolutionDiagnosticNow {
+    dispatch_async(self.queue,^{ [self collectDiagnosticForReason:@"manual"]; });
+}
+- (void)endHighResolutionDiagnostic {
+    dispatch_async(self.queue,^{
+        if(self.stopping || ![@[@"waiting",@"held"] containsObject:self.diagnosticState ?: @""]) return;
+        [self recordEvent:@"diagnostic_ended" fields:@{@"attempt_id":self.diagnosticAttempt ?: @"unknown"}];
+        self.diagnosticAttempt=nil; self.diagnosticWatch=nil;
+        self.diagnosticTetherIdentity=nil; self.diagnosticCameraServiceIdentity=nil;
+        self.diagnosticInterfaceID=0;
+        [self setDiagnosticState:nil zh:nil en:nil];
     });
 }
 - (void)stopTool { [self stopToolWithCompletion:^{}]; }

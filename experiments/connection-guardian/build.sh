@@ -37,10 +37,16 @@ done
 "$CLANG" "${COMMON[@]}" "$TASK_DIR/tests/GuardianEventLogTests.m" "$TASK_DIR/GuardianEventLog.m" \
     -framework Foundation -o "$TASK_BUILD_DIR/GuardianEventLogTests"
 "$TASK_BUILD_DIR/GuardianEventLogTests"
+"$CLANG" "${COMMON[@]}" "$TASK_DIR/tests/GuardianRAWArrivalTests.m" "$TASK_DIR/GuardianRAWArrival.m" \
+    -framework Foundation -o "$TASK_BUILD_DIR/GuardianRAWArrivalTests"
+"$TASK_BUILD_DIR/GuardianRAWArrivalTests"
+DIAGNOSTIC_SOURCES=("$TASK_DIR/GuardianRAWArrival.m" "$TASK_DIR/GuardianDiagnosticCapture.m")
 "$CLANG" "${COMMON[@]}" "$TASK_DIR/tests/GuardianPolicyTests.m" "$TASK_DIR/GuardianEventLog.m" \
+    "${DIAGNOSTIC_SOURCES[@]}" \
     -framework Cocoa -framework Security -o "$TASK_BUILD_DIR/GuardianPolicyTests"
 "$TASK_BUILD_DIR/GuardianPolicyTests"
 "$CLANG" "${COMMON[@]}" "$TASK_DIR/GuardianApp.m" "$TASK_DIR/GuardianController.m" "$TASK_DIR/GuardianEventLog.m" \
+    "${DIAGNOSTIC_SOURCES[@]}" \
     -framework Cocoa -framework Security -o "$STAGE/Contents/MacOS/LUMIXConnectionGuardian"
 cat > "$STAGE/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -52,8 +58,8 @@ cat > "$STAGE/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>LUMIXConnectionGuardian</string>
 <key>CFBundleIconFile</key><string>GuardianAppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.4</string>
-<key>CFBundleVersion</key><string>6</string>
+<key>CFBundleShortVersionString</key><string>0.2.5</string>
+<key>CFBundleVersion</key><string>7</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>LSUIElement</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>

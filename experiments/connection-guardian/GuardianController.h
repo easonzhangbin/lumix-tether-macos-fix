@@ -12,6 +12,9 @@ NS_ASSUME_NONNULL_BEGIN
  * external_interface_owner and external_interface_owner_info {name,pid}
  * (fresh, confirmed third-party interface ownership only; otherwise false/{}),
  * log_directory; inspection contains the last read-only service snapshot.
+ * diagnostic_state, diagnostic_message_zh, diagnostic_message_en,
+ * diagnostic_can_begin and optional diagnostic_directory describe the local
+ * high-resolution RAW watch. Ending it leaves automatic recovery paused.
  * start is explicit opt-in to bounded service recovery while Tether is absent.
  * pause/stopTool leave Tether alone. Reconnect first requests normal quit.
  * endSession first disables recovery, waits for this tool's bounded work,
@@ -31,6 +34,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)forceRestart;
 - (void)forceQuit;
 - (void)openTether;
+- (void)beginHighResolutionDiagnosticAtDirectory:(NSURL *)directory;
+- (void)captureHighResolutionDiagnosticNow;
+- (void)endHighResolutionDiagnostic;
 - (void)stopTool;
 - (void)stopToolWithCompletion:(dispatch_block_t)completion;
 @end

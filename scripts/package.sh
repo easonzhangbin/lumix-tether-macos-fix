@@ -6,7 +6,7 @@ SCRIPT_DIR="${0:A:h}"
 PROJECT_ROOT="${SCRIPT_DIR:h}"
 RELEASE_NAME='LUMIX Tether USB Fix'
 OUTPUT_DIR="${PROJECT_ROOT}/dist"
-RELEASE_VERSION='1.0.2'
+RELEASE_VERSION="$(< "${PROJECT_ROOT}/VERSION")"
 PACKAGE_TMP=''
 DRY_RUN=0
 die() { print -u2 -r -- "Packaging failed: $*"; exit 1; }
@@ -15,13 +15,11 @@ while (( $# )); do
         --output-dir)
             (( $# >= 2 )) || die '--output-dir needs a directory.'
             OUTPUT_DIR="${2:A}"; shift 2 ;;
-        --version)
-            (( $# >= 2 )) || die '--version needs a value.'
-            RELEASE_VERSION="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help)
-            print -r -- 'Usage: scripts/package.sh [--output-dir DIRECTORY] [--version VERSION] [--dry-run]'
+            print -r -- 'Usage: scripts/package.sh [--output-dir DIRECTORY] [--dry-run]'
             print -r -- 'Packages DIRECTORY/LUMIX Tether USB Fix using an explicit own-code/docs allowlist.'
+            print -r -- 'The version comes from the repository VERSION file.'
             exit 0 ;;
         *) die "Unknown argument: $1" ;;
     esac
@@ -29,6 +27,7 @@ done
 [[ "$RELEASE_VERSION" == [0-9]* && "$RELEASE_VERSION" != *[^0-9A-Za-z._-]* ]] || die 'Unsafe version string.'
 RELEASE_PATH="${OUTPUT_DIR}/${RELEASE_NAME}"
 [[ -d "$RELEASE_PATH" ]] || die 'Build the CLI release with scripts/build.sh first.'
+[[ "$(< "${RELEASE_PATH}/VERSION")" == "$RELEASE_VERSION" ]] || die 'The built release has a different VERSION; rebuild it first.'
 "${SCRIPT_DIR}/self-check.sh" "$RELEASE_PATH"
 ZIP_NAME="LUMIX-Tether-USB-Fix-${RELEASE_VERSION}-arm64.zip"
 ZIP_PATH="${OUTPUT_DIR}/${ZIP_NAME}"
@@ -41,7 +40,7 @@ trap '[[ -z "$PACKAGE_TMP" ]] || /bin/rm -rf -- "$PACKAGE_TMP"' EXIT
 STAGED_RELEASE="${PACKAGE_TMP}/${RELEASE_NAME}"
 /bin/mkdir -p "$STAGED_RELEASE"
 typeset -a ALLOWED_FILES
-ALLOWED_FILES=(bin/s1h_iousbhost_probe bin/s1h_camera_service 恢复S1H连接.command 'Restore S1H Connection.command'
+ALLOWED_FILES=(bin/s1h_iousbhost_probe bin/s1h_camera_service VERSION 恢复S1H连接.command 'Restore S1H Connection.command'
                重启相机服务并恢复连接.command 'Restart Camera Service and Restore.command'
                README.md README.zh-CN.md LICENSE CONTRIBUTING.md docs/TECHNICAL.md assets/alipay-donate.jpg)
 for relative_path in "${ALLOWED_FILES[@]}"; do

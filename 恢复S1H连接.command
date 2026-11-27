@@ -2,7 +2,7 @@
 # Recover USB/PTP before launching official Tether in the system language.
 set -euo pipefail
 TASK_DIR="${0:A:h}"
-TOOL_VERSION=1.0.2
+VERSION_ONLY=0
 CHECK_ONLY=0
 DIAGNOSE_ONLY=0
 RESTART_CAMERA_SERVICE=0
@@ -13,7 +13,7 @@ while (( $# )); do
         --check) CHECK_ONLY=1; shift ;;
         --diagnose) DIAGNOSE_ONLY=1; shift ;;
         --restart-camera-service) RESTART_CAMERA_SERVICE=1; shift ;;
-        --version) print -r -- "$TOOL_VERSION"; exit 0 ;;
+        --version) VERSION_ONLY=1; break ;;
         --language) (( $# >= 2 )) || exit 2; LANGUAGE_OPTION="$2"; shift 2 ;;
         --tether-app) (( $# >= 2 )) || exit 2; TETHER_APP_OPTION="${2:A}"; shift 2 ;;
         -h|--help)
@@ -51,6 +51,15 @@ say() {
     return 0
 }
 fail() { say "$1" "$2" >&2; exit 1; }
+TOOL_VERSION=''
+if [[ -f "$TASK_DIR/VERSION" ]]; then
+    TOOL_VERSION="$(< "$TASK_DIR/VERSION")" 2>/dev/null || TOOL_VERSION=''
+fi
+[[ -n "$TOOL_VERSION" ]] || fail '无法读取版本，请重新解压整个工具文件夹。' 'Version is unavailable. Extract the complete tool folder.'
+if (( VERSION_ONLY )); then
+    print -r -- "$TOOL_VERSION"
+    exit 0
+fi
 [[ "$(/usr/bin/uname -s)" == Darwin ]] || fail '此工具只支持 macOS。' 'This tool requires macOS.'
 [[ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" == 1 ]] || fail '此版本只支持 Apple 芯片 Mac。' 'This release requires an Apple silicon Mac.'
 RECOVERY_HELPER=''
@@ -121,11 +130,21 @@ if (( DIAGNOSE_ONLY )); then
     say "诊断日志：$RECOVERY_LOG" "Diagnostic log: $RECOVERY_LOG"
     exit 0
 fi
-for CAMERA_APP in 'LUMIX Tether' 'Preview' 'Image Capture' 'Photos'; do
-    if /usr/bin/pgrep -x "$CAMERA_APP" >/dev/null 2>&1; then
-        fail "请先正常退出 $CAMERA_APP，再运行本工具。" "Quit $CAMERA_APP normally, then run this tool again."
-    fi
-done
+# The service helper is the only owner of the camera/import software list.
+# A running application is a conservative blocker, not proof of USB ownership.
+INSPECTION_JSON="$RECOVERY_LOG_DIR/inspection-$RECOVERY_STAMP-$$.json"
+"$SERVICE_HELPER" --inspect > "$INSPECTION_JSON" 2>> "$RECOVERY_LOG" ||
+    fail "无法确认相机软件状态；未执行 USB 恢复、未启动 Tether。日志：$RECOVERY_LOG" "Camera software could not be checked; no USB probe or Tether launch. Log: $RECOVERY_LOG"
+/bin/cat "$INSPECTION_JSON" >> "$RECOVERY_LOG"
+CAMERA_APPS_PLIST="$(/usr/bin/plutil -extract known_camera_apps xml1 -o - "$INSPECTION_JSON" 2>/dev/null)" ||
+    fail "无法读取相机软件状态；未执行 USB 恢复、未启动 Tether。日志：$RECOVERY_LOG" "Camera software state was unreadable; no USB probe or Tether launch. Log: $RECOVERY_LOG"
+CAMERA_APP_NAMES="$(print -r -- "$CAMERA_APPS_PLIST" | /usr/bin/awk '
+    /<key>name<\/key>/ { wanted = 1; next }
+    wanted && /<string>/ { gsub(/.*<string>|<\/string>.*/, ""); list = list (list ? ", " : "") $0; wanted = 0 }
+    END { print list }')"
+if [[ -n "$CAMERA_APP_NAMES" ]]; then
+    fail "请先正常退出 $CAMERA_APP_NAMES，再运行本工具。" "Quit $CAMERA_APP_NAMES normally, then run this tool again."
+fi
 if (( RESTART_CAMERA_SERVICE )); then
     say '检查 USB 占用与应用状态，按明确选择重启当前用户的相机服务……' 'Checking USB ownership and camera apps before the explicitly selected camera service restart...'
     if ! run_logged "$SERVICE_HELPER" --restart-camera-service; then

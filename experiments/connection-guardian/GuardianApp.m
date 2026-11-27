@@ -29,8 +29,14 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
 @property(nonatomic, strong) NSMenuItem *forceItem;
 @property(nonatomic, strong) NSMenuItem *openItem;
 @property(nonatomic, strong) NSMenuItem *mainOpenItem;
+@property(nonatomic, strong) NSMenuItem *diagnosticInfoItem;
+@property(nonatomic, strong) NSMenuItem *beginDiagnosticItem;
+@property(nonatomic, strong) NSMenuItem *captureDiagnosticItem;
+@property(nonatomic, strong) NSMenuItem *endDiagnosticItem;
 @property(nonatomic, strong) NSMenuItem *logsItem;
 @property(nonatomic, strong) NSMenuItem *quitItem;
+@property(nonatomic, strong) NSOpenPanel *diagnosticPanel;
+@property(nonatomic, strong) NSURL *lastDiagnosticImportDirectory;
 @property(nonatomic, strong) NSWindow *statusWindow;
 @property(nonatomic, strong) NSTextField *windowUSB;
 @property(nonatomic, strong) NSTextField *windowTether;
@@ -42,6 +48,8 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
 @property(nonatomic, strong) NSButton *windowStart;
 @property(nonatomic, strong) NSButton *windowEnd;
 @property(nonatomic, strong) NSButton *windowPause;
+@property(nonatomic, strong) NSButton *windowDiagnostic;
+@property(nonatomic, strong) NSButton *windowEndDiagnostic;
 @property(nonatomic, copy) NSDictionary *snapshot;
 @property(nonatomic) BOOL chinese;
 @property(nonatomic) BOOL terminating;
@@ -126,6 +134,17 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     [self.menu addItem:NSMenuItem.separatorItem];
     self.openItem = [self actionItem:[self text:@"检查连接并打开 Tether" english:@"Check Connection and Open Tether"] action:@selector(openTether:)];
     [self actionItem:[self text:@"查看连接状态…" english:@"Show Connection Status…"] action:@selector(showStatus:)];
+    [self.menu addItem:NSMenuItem.separatorItem];
+    self.diagnosticInfoItem = [self informationItem:@""];
+    self.beginDiagnosticItem = [self actionItem:[self text:@"开始摇摇乐诊断…" english:@"Start High Resolution Diagnostic…"]
+        action:@selector(beginHighResolutionDiagnostic:)];
+    self.beginDiagnosticItem.toolTip = [self text:@"在 Tether 联机后选择导入文件夹，等诊断就绪，再拍一张 XL RAW。"
+        english:@"With Tether connected, choose its import folder, wait until the diagnostic is ready and take one XL RAW."];
+    self.captureDiagnosticItem = [self actionItem:[self text:@"立即保存诊断" english:@"Save Diagnostic Now"]
+        action:@selector(captureHighResolutionDiagnostic:)];
+    self.endDiagnosticItem = [self actionItem:[self text:@"退出诊断模式" english:@"End Diagnostic Mode"]
+        action:@selector(endHighResolutionDiagnostic:)];
+    self.endDiagnosticItem.toolTip = [self text:@"退出后仍保持自动恢复暂停。" english:@"Automatic recovery stays paused when you end diagnostic mode."];
     self.logsItem = [self actionItem:[self text:@"显示诊断与日志文件夹" english:@"Show Diagnostics and Logs Folder"] action:@selector(showLogs:)];
     [self.menu addItem:NSMenuItem.separatorItem];
     self.quitItem = [self actionItem:[self text:@"退出守护工具（保留 Tether）" english:@"Quit Guardian (Leave Tether As Is)"] action:@selector(quit:)];
@@ -189,7 +208,11 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     self.windowPause = [NSButton buttonWithTitle:[self text:@"仅暂停自动恢复" english:@"Pause Recovery Only"] target:self action:@selector(pause:)];
     self.windowPause.frame = NSMakeRect(444, 24, 194, 32);
     self.windowPause.toolTip = self.pauseItem.toolTip;
-    for (NSButton *button in @[self.windowStart, self.windowEnd, self.windowPause])
+    self.windowDiagnostic = [NSButton buttonWithTitle:self.beginDiagnosticItem.title target:self action:@selector(beginHighResolutionDiagnostic:)];
+    self.windowDiagnostic.frame = NSMakeRect(22, 58, 224, 26);
+    self.windowEndDiagnostic = [NSButton buttonWithTitle:self.endDiagnosticItem.title target:self action:@selector(endHighResolutionDiagnostic:)];
+    self.windowEndDiagnostic.frame = NSMakeRect(255, 58, 194, 26);
+    for (NSButton *button in @[self.windowStart, self.windowEnd, self.windowPause, self.windowDiagnostic, self.windowEndDiagnostic])
         [self.statusWindow.contentView addSubview:button];
     [self.statusWindow center];
     NSMenu *mainMenu = [NSMenu new];
@@ -295,6 +318,22 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     if ([self snapshotBool:@"desired_running"]) return [self text:@"正在守护" english:@"Guardian Is Watching"];
     return [self text:@"自动恢复未启用" english:@"Automatic Recovery Is Off"];
 }
+- (NSString *)diagnosticPhaseText:(NSString *)state {
+    if ([state isEqualToString:@"arming"])
+        return [self text:@"正在记录拍摄前的文件状态…" english:@"Checking Existing Files…"];
+    if ([state isEqualToString:@"waiting"])
+        return [self text:@"已就绪，等待一张 XL RAW" english:@"Ready for One XL RAW"];
+    if ([state isEqualToString:@"collecting"])
+        return [self text:@"正在保存诊断…" english:@"Saving Diagnostic…"];
+    if ([state isEqualToString:@"held"])
+        return [self text:@"已暂停恢复，保留现场" english:@"Recovery Paused; Session Preserved"];
+    return @"";
+}
+- (NSString *)diagnosticFolder {
+    id directory = self.snapshot[@"diagnostic_directory"];
+    if ([directory isKindOfClass:NSURL.class] && [directory isFileURL]) return [directory path] ?: @"";
+    return [self string:directory];
+}
 - (void)render {
     BOOL busy = [self snapshotBool:@"busy"];
     BOOL desired = [self snapshotBool:@"desired_running"];
@@ -304,6 +343,13 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     BOOL ended = [self snapshotBool:@"session_ended"];
     BOOL tetherValid = [self snapshotBool:@"tether_observation_valid"];
     BOOL inspectionValid = [self snapshotBool:@"inspection_observation_valid"];
+    NSString *diagnosticState = [self string:self.snapshot[@"diagnostic_state"]];
+    BOOL diagnosticActive = diagnosticState.length && ![diagnosticState isEqualToString:@"idle"];
+    BOOL diagnosticWaiting = [diagnosticState isEqualToString:@"waiting"];
+    BOOL diagnosticHeld = [diagnosticState isEqualToString:@"held"];
+    NSString *diagnosticPhase = [self diagnosticPhaseText:diagnosticState];
+    NSString *diagnosticMessage = [self string:self.snapshot[self.chinese ? @"diagnostic_message_zh" : @"diagnostic_message_en"]];
+    if (!diagnosticMessage.length) diagnosticMessage = [self string:self.snapshot[@"diagnostic_message_en"]];
     NSDictionary *inspection = [self inspection];
     NSString *state = [self string:self.snapshot[@"state"]];
     BOOL inspectionError = [state isEqualToString:@"inspection_error"] ||
@@ -322,6 +368,11 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     if (self.terminating) message = [self text:@"等待本工具的连接检查结束；不更改官方 Tether 当前状态。" english:@"Waiting for this tool's connection check; official Tether is left as it is."];
     if (!message.length) message = [self text:@"在相机选择 PC(Tether)，然后开始守护。" english:@"Select PC(Tether) on the camera, then start Guardian."];
     [self setInfo:self.messageItem text:message];
+    self.diagnosticInfoItem.hidden = !diagnosticActive && !diagnosticMessage.length;
+    NSString *diagnosticTitle = [NSString stringWithFormat:[self text:@"摇摇乐诊断：%@" english:@"High Resolution Diagnostic: %@"],
+        diagnosticPhase.length ? diagnosticPhase : diagnosticMessage];
+    [self setInfo:self.diagnosticInfoItem text:diagnosticTitle];
+    self.diagnosticInfoItem.toolTip = diagnosticMessage.length ? diagnosticMessage : diagnosticTitle;
     NSString *model = [self string:inspection[@"usb_product_name"]];
     id speedValue = inspection[@"usb_link_speed_bps"];
     double speed = [speedValue isKindOfClass:NSNumber.class] ? [speedValue doubleValue] : 0;
@@ -429,9 +480,9 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     self.startItem.title = desired ? [self text:@"保持 Tether 运行" english:@"Keep Tether Running"]
         : (ended ? [self text:@"开始新一次拍摄并守护" english:@"Start a New Session and Guardian"]
             : [self text:@"开始守护并打开 Tether" english:@"Start Guardian and Open Tether"]);
-    self.startItem.enabled = !self.terminating && !busy && !ending;
-    self.endItem.enabled = !self.terminating && !ending && !ended;
-    self.pauseItem.enabled = !self.terminating && (desired || ending);
+    self.startItem.enabled = !self.terminating && !diagnosticActive && !busy && !ending;
+    self.endItem.enabled = !self.terminating && !diagnosticActive && !ending && !ended;
+    self.pauseItem.enabled = !self.terminating && !diagnosticActive && (desired || ending);
     self.pauseItem.title = ending ? [self text:@"取消结束等待，保持暂停" english:@"Cancel End Wait; Keep Recovery Paused"]
         : [self text:@"仅暂停自动恢复（保留 Tether）" english:@"Pause Recovery Only (Leave Tether As Is)"];
     self.pauseItem.toolTip = ending
@@ -441,7 +492,7 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
             english:@"Pause future automatic recovery without asking Tether to quit. Choose End This Shooting Session when you have finished shooting."];
     self.pauseItem.state = !desired && !ending && !ended && ![state isEqualToString:@"idle"]
         ? NSControlStateValueOn : NSControlStateValueOff;
-    self.reconnectItem.enabled = !self.terminating && !busy && !ending;
+    self.reconnectItem.enabled = !self.terminating && !diagnosticActive && !busy && !ending;
     // Normal quit remains "busy" after its deadline. The controller owns the
     // separate force permission and revalidates the exact process on action.
     NSString *forceAction = [self string:self.snapshot[@"force_action"]];
@@ -452,8 +503,8 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
         : [self text:@"强制重启 Tether（退出已超时）" english:@"Force Restart Tether (Quit Timed Out)"];
     self.forceItem.toolTip = [self text:@"仅在正常退出超时后，由你另行明确选择；结束拍摄时不会重新打开 Tether。"
         english:@"Requires a separate explicit action after normal quit times out. Ending a session does not reopen Tether."];
-    self.forceItem.enabled = !self.terminating && (forceQuit || forceRestart);
-    self.openItem.enabled = !self.terminating && !busy && !ending;
+    self.forceItem.enabled = !self.terminating && !diagnosticActive && (forceQuit || forceRestart);
+    self.openItem.enabled = !self.terminating && !diagnosticActive && !busy && !ending;
     self.openItem.title = tetherValid && tetherRunning
         ? [self text:@"检查 Tether 状态（进程已运行）" english:@"Check Tether Status (Process Running)"]
         : [self text:@"检查连接并打开 Tether" english:@"Check Connection and Open Tether"];
@@ -465,10 +516,29 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     self.mainOpenItem.title = self.openItem.title;
     self.mainOpenItem.enabled = self.openItem.enabled;
     self.mainOpenItem.toolTip = self.openItem.toolTip;
+    self.beginDiagnosticItem.enabled = !self.terminating && !self.diagnosticPanel && !diagnosticActive &&
+        [self snapshotBool:@"diagnostic_can_begin"];
+    self.captureDiagnosticItem.hidden = !diagnosticActive;
+    self.captureDiagnosticItem.enabled = !self.terminating && diagnosticWaiting;
+    self.endDiagnosticItem.hidden = !diagnosticActive;
+    self.endDiagnosticItem.enabled = !self.terminating && (diagnosticWaiting || diagnosticHeld);
+    NSMenuItem *diagnosticAction = diagnosticActive ? self.captureDiagnosticItem : self.beginDiagnosticItem;
+    self.windowDiagnostic.title = diagnosticAction.title;
+    self.windowDiagnostic.action = diagnosticAction.action;
+    self.windowDiagnostic.toolTip = diagnosticAction.toolTip;
+    self.windowDiagnostic.enabled = diagnosticAction.enabled;
+    self.windowDiagnostic.hidden = diagnosticActive && !diagnosticWaiting;
+    self.windowEndDiagnostic.hidden = self.endDiagnosticItem.hidden;
+    self.windowEndDiagnostic.enabled = self.endDiagnosticItem.enabled;
+    NSString *diagnosticDirectory = [self diagnosticFolder];
     NSString *logDirectory = [self string:self.snapshot[@"log_directory"]];
-    self.logsItem.enabled = !self.terminating && logDirectory.isAbsolutePath;
+    self.logsItem.title = diagnosticDirectory.isAbsolutePath
+        ? [self text:@"显示本次诊断文件夹" english:@"Show This Diagnostic Folder"]
+        : [self text:@"显示诊断与日志文件夹" english:@"Show Diagnostics and Logs Folder"];
+    self.logsItem.enabled = !self.terminating && (diagnosticDirectory.isAbsolutePath || logDirectory.isAbsolutePath);
     self.quitItem.enabled = !self.terminating;
-    self.statusItem.button.toolTip = [NSString stringWithFormat:@"LUMIX — %@\n%@", phase, message];
+    self.statusItem.button.toolTip = [NSString stringWithFormat:@"LUMIX — %@\n%@",
+        diagnosticActive ? diagnosticTitle : phase, diagnosticActive ? diagnosticMessage : message];
     self.windowUSB.stringValue = self.cameraItem.title;
     self.windowUSB.toolTip = self.cameraItem.toolTip;
     self.windowTether.stringValue = self.tetherItem.title;
@@ -485,7 +555,10 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     self.windowRecoveryHelp.stringValue = recoveryHelp;
     self.windowRecoveryHelp.toolTip = recoveryHelp;
     self.windowRecoveryHelp.textColor = recoveryAlert ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
-    self.windowGuardian.stringValue = [NSString stringWithFormat:[self text:@"守护状态：%@\n%@" english:@"Guardian: %@\n%@"], phase, message];
+    self.windowGuardian.stringValue = diagnosticActive || diagnosticMessage.length
+        ? (diagnosticPhase.length && diagnosticMessage.length
+            ? [NSString stringWithFormat:@"%@\n%@", diagnosticTitle, diagnosticMessage] : diagnosticTitle)
+        : [NSString stringWithFormat:[self text:@"守护状态：%@\n%@" english:@"Guardian: %@\n%@"], phase, message];
     self.windowGuardian.toolTip = self.windowGuardian.stringValue;
     self.windowStart.enabled = self.startItem.enabled;
     self.windowStart.title = ended ? [self text:@"开始新的拍摄" english:@"Start a New Session"] : [self text:@"开始守护" english:@"Start Guardian"];
@@ -507,9 +580,43 @@ static BOOL GuardianUIHasExternalOwner(NSDictionary *snapshot, NSDictionary *ins
     else if ([action isEqualToString:@"restart"] && [self snapshotBool:@"can_force_restart"]) [self.controller forceRestart];
 }
 - (void)openTether:(id)sender { (void)sender; if (self.openItem.enabled) [self.controller openTether]; }
+- (void)beginHighResolutionDiagnostic:(id)sender {
+    (void)sender;
+    if (!self.beginDiagnosticItem.enabled) return;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = NO;
+    panel.canCreateDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.title = [self text:@"选择 Tether 的导入文件夹" english:@"Choose the Tether Import Folder"];
+    panel.prompt = [self text:@"开始诊断" english:@"Start Diagnostic"];
+    panel.message = [self text:@"选择与 Tether 设置相同的导入文件夹。等诊断就绪后拍一张 XL RAW。30 秒没有收到完整文件就自动保存诊断，期间暂停自动恢复。"
+        english:@"Choose the same import folder as in Tether. Once the diagnostic is ready, take one XL RAW. If no complete file arrives within 30 seconds, Guardian saves a diagnostic. Automatic recovery is paused."];
+    panel.directoryURL = self.lastDiagnosticImportDirectory ?: [NSFileManager.defaultManager URLsForDirectory:NSPicturesDirectory inDomains:NSUserDomainMask].firstObject;
+    self.diagnosticPanel = panel;
+    [self render];
+    [self showStatus:nil];
+    [panel beginSheetModalForWindow:self.statusWindow completionHandler:^(NSModalResponse response) {
+        NSURL *directory = panel.URL;
+        self.diagnosticPanel = nil;
+        [self render];
+        if (self.terminating || response != NSModalResponseOK || !directory.isFileURL) return;
+        self.lastDiagnosticImportDirectory = directory;
+        [self.controller beginHighResolutionDiagnosticAtDirectory:directory];
+    }];
+}
+- (void)captureHighResolutionDiagnostic:(id)sender {
+    (void)sender;
+    if (self.captureDiagnosticItem.enabled) [self.controller captureHighResolutionDiagnosticNow];
+}
+- (void)endHighResolutionDiagnostic:(id)sender {
+    (void)sender;
+    if (self.endDiagnosticItem.enabled) [self.controller endHighResolutionDiagnostic];
+}
 - (void)showLogs:(id)sender {
     (void)sender;
-    NSString *path = [self string:self.snapshot[@"log_directory"]];
+    NSString *path = [self diagnosticFolder];
+    if (!path.isAbsolutePath) path = [self string:self.snapshot[@"log_directory"]];
     if (self.logsItem.enabled && path.isAbsolutePath) [NSWorkspace.sharedWorkspace openURL:[NSURL fileURLWithPath:path isDirectory:YES]];
 }
 - (void)quit:(id)sender { (void)sender; [NSApp terminate:nil]; }

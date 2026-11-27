@@ -4,17 +4,29 @@
 
 A menu-bar connection supervisor for DC-S1H. Separately installed official LUMIX Tether 2.12 retains shooting, exposure controls, white balance and original-file saving. This utility prepares the connection, monitors USB changes and coordinates application restarts.
 
-This is **Guardian 0.2.4 community beta**, published as [guardian-v0.2.4](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4). A previous single Guardian recovery handoff was followed by official Tether preview and a saved 6000×4000 RAW (36,048,384 bytes). Aperture, shutter, ISO and color-temperature controls were verified separately in the official UI. These short checks do not establish repeated hot-plug, sleep/wake or long-duration reliability.
+The current community beta is Guardian 0.2.5 for Apple Silicon. The release includes a DMG and its SHA-256 checksum. A previous Guardian recovery handoff was followed by official Tether preview and a saved 6000×4000 RAW (36,048,384 bytes). Aperture, shutter, ISO and color-temperature controls were verified separately in the official UI. [Guardian 0.2.5 downloads](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5)
 
 The app provides End This Shoot and separates USB detection, the Tether process and the shooting-connection state. Local rotating event logs support troubleshooting. Confirm shooting inside Tether: a present USB device, recorded interface owner or running process never establishes that capture is working.
 
-## 0.2.4 external-owner check
+## High Resolution Diagnostic
+
+1. Confirm the S1H is connected in Tether, enable RAW file transfer, and set the camera's High Resolution image size to XL.
+2. Choose **Start High Resolution Diagnostic…** from the Guardian menu. Select the same import folder as in Tether.
+3. Wait for **Watch ready**, then take one XL shot. Guardian looks for a new structurally complete 12000×8000 DC-S1H Pixel Shift RW2 in that folder or an immediate date subfolder named `YYYYMMDD`. The 30-second timer starts when the watch is ready. Guardian does not detect the shutter press or read the memory card.
+4. If a complete RAW arrives, Guardian reports it. If the wait expires, the folder check fails, or the USB or Tether session changes while waiting, Guardian saves available evidence. **Save Diagnostic Now** can collect it immediately while waiting.
+5. After collection, use **Show This Diagnostic Folder** to inspect the report under `~/Library/Logs/S1H Connection Guardian/diagnostics`. **End Diagnostic Mode** exits the diagnostic and leaves automatic recovery paused.
+
+The diagnostic pauses automatic recovery from the moment it starts so Guardian leaves Tether and the USB session alone. Reports can include Guardian events, available logs and thread samples from verified Tether and camera-service processes, and a matching Tether crash report when available. Diagnostics stay on this Mac. Review their contents before sharing.
+
+The 0.2.5 timeout and session hold were tested with the S1H connected. This feature gathers evidence for the intermittent high-resolution RAW transfer stall. The cause and a fix remain unverified.
+
+## External interface ownership
 
 Fresh confirmed third-party ownership, including the observed NegPy case, is shown in red in the interface-owner and recovery rows. Disconnect the camera in that app or quit it normally; Guardian does not terminate it or discard its work. Unknown or stale inspection clears the warning and old owner name. Detection of Preview or another known running client is a separate conservative blocker, not proof that the client owns USB. Normal system `ptpcamerad` ownership is eligible only for the existing guarded current-user service procedure, not third-party-app termination.
 
-All launch entries preserve fresh inspection → strict preparation → post-preparation validation → official launch while Tether is absent. Blocked pending work waits without consuming I/O retry counts. When Tether is still running, Guardian remains passive even after a foreign owner releases the camera; request Reconnect if Tether needs a normal restart. Current hardware-free validation totals **347: 16 identity, 51 service guard, 50 event writer and 230 controller/policy checks**. This version has not repeated the failed physical hot-plug test and does not claim to fix that camera lockup.
+All launch entries preserve fresh inspection → strict preparation → post-preparation validation → official launch while Tether is absent. Blocked pending work waits without consuming I/O retry counts. When Tether is still running, Guardian remains passive even after a foreign owner releases the camera. Request Reconnect if Tether needs a normal restart. The 0.2.5 build passed 379 hardware-free checks across identity, service guard, event logging, RAW arrival and controller policy.
 
-The current [0.2.4 beta download](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4) is the retained binary release. CI validates only and provides no artifact downloads. Older release/tag and CI downloads are retired; the earlier CLI remains available through its [source build guide](https://github.com/easonzhangbin/lumix-tether-macos-fix/blob/main/docs/CLI.md).
+The earlier CLI remains available to build from source. [CLI build guide](https://github.com/easonzhangbin/lumix-tether-macos-fix/blob/main/docs/CLI.md)
 
 ## Historical 0.2.3 correction
 
@@ -28,14 +40,17 @@ Recommended sequence: finish shooting and transfers → End This Shoot → confi
 
 A separate pre-recovery check names detected camera clients such as Preview, without claiming they actually own the interface. The actual owner is shown separately. Checking and opening Tether now uses the preparation chain while Tether is absent; blocked and unblocked states are recorded locally.
 
-## Use
+## Install and use
 
 1. Install [official LUMIX Tether 2.12](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html) separately. This tool neither includes nor modifies Panasonic software.
-2. Connect the S1H using a data cable and select PC(Tether).
-3. Open `LUMIX Connection Guardian.app` to view connection status, then choose Start Guardian and Open Tether. Closing the status window keeps the menu-bar app running; reopen the window from its menu.
-4. Wait for connection preparation and Tether startup, then confirm preview and shoot in Tether.
-5. After capture and file transfers finish, choose End This Shoot. It disables automatic recovery first, requests a normal Tether quit, and never reopens Tether automatically. Guardian stays in the menu bar.
-6. To leave Tether open while stopping automatic recovery, choose Pause Recovery. Quitting Guardian also leaves Tether alone; any active bounded preparation finishes its cleanup first.
+2. Open the Guardian 0.2.5 DMG and drag the app to the Applications shortcut. [Release downloads](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5)
+3. Connect the S1H using a data cable and select PC(Tether).
+4. Open `LUMIX Connection Guardian.app` to view connection status, then choose Start Guardian and Open Tether. Closing the status window keeps the menu-bar app running. Reopen the window from its menu.
+5. Wait for connection preparation and Tether startup, then confirm preview and shoot in Tether.
+6. After capture and file transfers finish, choose End This Shoot. It disables automatic recovery first and requests a normal Tether quit. Guardian stays idle in the menu bar.
+7. To leave Tether open while stopping automatic recovery, choose Pause Recovery. Quitting Guardian also leaves Tether alone. Any active bounded preparation finishes its cleanup first.
+
+This beta uses an ad-hoc signature and has no Apple notarization. If macOS prevents opening the download, verify its source and checksum and review Apple's guidance. [Open an app safely on your Mac](https://support.apple.com/en-us/102445)
 
 The app does not install a login item, system service or LaunchAgent. Its Chinese/English interface follows the preferred system language. It uses Tether's existing language argument when launching that application.
 
@@ -54,11 +69,11 @@ Recommended shutdown order: **finish transfer → End This Shoot → confirm Tet
 
 **DC-S1H and arm64 / Apple Silicon only.** Install official Tether 2.12 separately. The tested setup is M1 Max/macOS 27.0.1; the macOS 12 deployment target does not establish support for every OS, Mac or camera.
 
-Monitoring reads USB registry information, ownership and application processes. A new USB recovery may start only while Tether is absent. A camera-service restart requires the existing guard to confirm this user's specific service and permit the action. The tool does not seize drivers, terminate other camera applications, capture images, or read/delete photographs.
+Monitoring reads USB registry information, ownership and application processes. A new USB recovery may start only while Tether is absent. A camera-service restart requires the existing guard to confirm this user's specific service and permit the action. The High Resolution Diagnostic only reads the metadata and lengths of new RAWs in the selected folder.
 
 Reconnect first requests a normal Tether quit. A confirmed physical USB detach may also request normal quit of the exact verified Tether instance Guardian launched. A quit timeout does not prove that the camera is idle, so there is no automatic forced termination; Force Restart after reconnect and Force Quit after ending a shoot are separate explicit actions. Force Quit at the end of a shoot never relaunches Tether. Recovery retries are bounded.
 
-Other applications can still launch independently; this utility cannot impose a cross-application USB lock. It cannot retain exclusive ownership while Tether needs the interface or repair Tether's internal thread waits from outside. An internal application failure requires restarting Tether and preparing a new connection.
+Other applications can still launch independently; this utility cannot impose a cross-application USB lock. It cannot retain exclusive ownership while Tether needs the interface or repair Tether's internal thread waits from outside.
 
 ## Local event logs
 
@@ -92,7 +107,7 @@ GUARDIAN_OUTPUT_DIR="$HOME/Library/Caches/LUMIX Connection Guardian/build" ./bui
 GUARDIAN_OUTPUT_DIR="$HOME/Library/Caches/LUMIX Connection Guardian/build" ./package.sh
 ```
 
-Packaging includes only this project's app, documentation, license and approved donation image. It excludes official Tether, photographs and local logs.
+The source packaging script creates a ZIP with this project's app, documentation, license and approved donation image. The release DMG contains the app, an Applications shortcut and bilingual installation notes.
 
 ## Support development
 

@@ -6,15 +6,21 @@
 
 **让 S1H 重新连上 Mac，继续使用原厂 Tether 拍摄。**
 
-**本机环境的五秒 USB 热拔插测试在 0.2.2 和 0.2.3 均失败，并需取电池断电复位。0.2.4 测试版尚未复测热拔插，不声称解决该卡住问题。**
-
 面向 Apple Silicon Mac 的独立菜单栏工具：准备 S1H 的 USB 连接，交给官方 Tether 2.12，再监测连接和应用状态。实时预览、拍摄、光圈、快门、ISO、白平衡及原片保存继续由松下程序提供；Guardian 负责连接恢复，以及清楚地结束本次拍摄。
 
-[下载 Guardian 0.2.4 测试版](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4) · [源码与详细说明](experiments/connection-guardian/README.zh-CN.md) · [早期恢复脚本](docs/CLI.zh-CN.md)
+[下载 Guardian 0.2.5 测试版（Apple Silicon DMG）](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/guardian-v0.2.5/LUMIX-Connection-Guardian-0.2.5-arm64.dmg) · [版本说明与 SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5) · [详细说明](experiments/connection-guardian/README.zh-CN.md) · [早期恢复脚本](docs/CLI.zh-CN.md)
 
 当前为在一套 S1H 环境验证的社区测试版，与松下或 Apple 无隶属关系。用户需另行安装官方 Tether；下载包只包含本项目应用及辅助程序。
 
-## 0.2.4：明确提示外部接口占用
+## 0.2.5 摇摇乐诊断
+
+在 Tether 连好 S1H 后，从守护菜单选**开始摇摇乐诊断…**，选择 Tether 的导入文件夹。等诊断显示就绪，再拍一张 XL。守护工具检查该文件夹及其直接日期子目录中是否到达结构完整的 12000×8000 DC-S1H RW2。
+
+从就绪起 30 秒内未收到完整 RAW 时，守护工具会保存可取得的本地日志和线程采样。等待期间也可点击**立即保存诊断**抓取现场。启动诊断时暂停自动恢复，退出诊断模式后仍保持暂停。通过**显示本次诊断文件夹**可在本机查看报告。
+
+高分辨率 RAW 偶发传输卡住的问题仍待解决。此前五秒 USB 热拔插测试需要取电池复位，0.2.5 尚未复测热拔插。[详细诊断步骤](experiments/connection-guardian/README.zh-CN.md#摇摇乐诊断)
+
+## 外部接口占用
 
 新鲜检查确认第三方软件持有接口时，会显示红字，例如 **“接口被 NegPy 占用，请先在该软件断开相机或正常退出”**。信息未知或过期后清除旧名称及红色警告。检测到某相机软件正在运行，是另一项保守恢复拦截，不等于证明它持有接口。正常 macOS `ptpcamerad` 服务与第三方软件分开处理，只有守卫核对通过才可恢复该服务；Guardian 不会自动关闭其他相机软件。
 
@@ -39,7 +45,7 @@ S1H 未在 USB 中重新枚举时，此测试版无法开始连接恢复。
 | 仅暂停自动恢复 | 停止后续自动恢复，保留 Tether 当前状态。 |
 | 结束本次拍摄 | 先停自动恢复，再请求 Tether 正常退出；守护工具继续保留，不会自动重开 Tether。请在照片传输完成后使用。 |
 | 重新连接 | 请求正常退出 Tether，再准备连接并重新打开。退出超时后提供单独的“强制退出／强制重启”操作，不会自动强杀 Tether。 |
-| 本地诊断 | 轮转记录操作、恢复步骤、启动请求及进程观察事件，并保留原有辅助程序诊断日志。 |
+| 摇摇乐诊断 | 监测 Tether 导入文件夹。XL RW2 未到达时保存本地日志与线程状态，暂停自动恢复以保留现场。 |
 
 物理断开 USB 后，可以请求由 Guardian 启动且身份仍一致的 Tether 正常退出。恢复有重试上限；占用未知或其他相机软件运行时，守卫可拒绝服务恢复。它无法提供跨应用 USB 禁入锁，也不能修复所有 Tether 内部挂起。
 
@@ -55,7 +61,7 @@ S1H 未在 USB 中重新枚举时，此测试版无法开始连接恢复。
 ## 安装与使用
 
 1. 从[松下官方下载页](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)安装 **LUMIX Tether 2.12**，放在 `/Applications` 或 `~/Applications`。
-2. 下载并解压 [Guardian 测试版 ZIP](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4)，将 **LUMIX Connection Guardian.app** 放进应用程序文件夹。
+2. 打开 Guardian 测试版 DMG，将 **LUMIX Connection Guardian.app** 拖到“应用程序”快捷方式。[Guardian 0.2.5 下载页](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5)
 3. 退出其他相机／照片导入软件，用数据线连接 S1H，相机选择 **PC(Tether)**。
 4. 打开 Guardian，点击**开始守护**。在官方 Tether 中选择相机、点击**开始**及 **LV**，确认预览后，向自己指定的保存目录试拍。
 5. 拍摄及文件传输完成后，点击**结束本次拍摄**。关闭状态窗口仍会保留菜单栏图标。
@@ -87,7 +93,8 @@ S1H 未在 USB 中重新枚举时，此测试版无法开始连接恢复。
 | 会话操作 | 仅暂停会保留 Tether；结束拍摄能正常退出，短时间观察未自动重开 |
 | 正常退出后恢复 | 0.2.3 从观察到旧进程退出至核实新 Tether 启动耗时 3.877 秒；之后另行确认实际官方实时预览通过 |
 | 占用提示 | 已安装的 0.2.4 在真实 NegPy 连接时，接口占用、恢复前检查和处理提示均显示红字；守护保持暂停 |
-| 自动检查 | 347 项通过：设备身份 16、服务守卫 51、事件日志 50、控制器／策略 230；均采用纯检查或模拟环境 |
+| 摇摇乐诊断 | 0.2.5 在等待超时后保存了本地报告与线程采样，并保持原 Tether 会话运行 |
+| 自动检查 | 379 项通过，包括设备身份（16）、服务守卫（51）、事件日志（50）、RAW 到达检测（25）和控制器策略（237）。检查无需连接相机。 |
 
 0.2.2 从观察到旧进程退出至核实新 Tether 启动耗时 3.852 秒，之后另行确认实时预览通过。但随后拔下 USB、等待五秒再接回的测试失败：相机停在“Please wait”，无法正常关机，需取出并重新装入电池断电复位。**0.2.3 相同五秒重连测试也失败。** 检测到断开后 0.968 秒，Tether 已正常退出，但相机未重新枚举，因此没有继续运行恢复或启动程序。修正后的只读检查成功报告零设备且无错误；相机仍需再次取电池复位，卡住的根因未证。
 
@@ -116,7 +123,7 @@ Apple Silicon Mac 安装 Xcode Command Line Tools 后执行：
 
 构建和自测不会连接相机或打开 Tether。工程位于 iCloud 同步目录时，请使用[详细说明](experiments/connection-guardian/README.zh-CN.md)中的独立输出目录，避免文件提供程序元数据影响严格签名验证。
 
-早期 `.command` 工具保留为源码，构建及用法见[脚本指南](docs/CLI.zh-CN.md)。下载仅保留当前 Guardian Release 的 ZIP 及 SHA-256 文件。CI 只做验证，不再提供额外产物下载；旧 Release／tag 和 CI 下载退役。[技术记录与边界](docs/TECHNICAL.md)、[参与贡献](CONTRIBUTING.md)、[问题反馈](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues/new?template=bug_report.yml)。
+早期 `.command` 工具保留为源码。当前 Guardian 版本提供 DMG 和 SHA-256 校验文件，CI 用于构建验证。[脚本指南](docs/CLI.zh-CN.md) · [技术记录与边界](docs/TECHNICAL.md) · [参与贡献](CONTRIBUTING.md) · [问题反馈](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues/new?template=bug_report.yml)
 
 ## 支持开发
 

@@ -4,7 +4,7 @@
 
 [简体中文](https://github.com/easonzhangbin/lumix-tether-macos-fix/blob/main/docs/CLI.zh-CN.md)
 
-The CLI is retained as [repository source](https://github.com/easonzhangbin/lumix-tether-macos-fix/tree/main), not an old release download. Build it using [Building from source](#building-from-source) below. Only the current [Guardian 0.2.4 beta](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.4) is retained as a binary release; its app bundle is separate from this CLI workflow.
+Build the CLI from the [repository source](https://github.com/easonzhangbin/lumix-tether-macos-fix/tree/main) using [Building from source](#building-from-source) below. For the menu-bar app installer, see the [current Guardian beta](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5).
 
 A small Apple Silicon USB recovery helper, started by a `.command` script, that clears pending PTP responses before opening Panasonic LUMIX Tether 2.12. It restored USB tethering and live view on one tested Panasonic DC-S1H setup, over both USB 2 and USB 3.
 

@@ -60,6 +60,7 @@ static NSDictionary *Changed(NSDictionary *base, NSString *key, id value) {
 @property(nonatomic,copy) void (^helperCompletion)(int,NSDictionary *,BOOL);
 @property(nonatomic) NSUInteger normalQuitRequests;
 @property(nonatomic) NSUInteger launchRequests;
+@property(nonatomic) NSUInteger diagnosticCaptures;
 - (instancetype)initFixture;
 - (void)completeHelper:(int)status result:(NSDictionary *)result;
 - (void)emitProductionSnapshot;
@@ -115,6 +116,11 @@ static NSDictionary *Changed(NSDictionary *base, NSString *key, id value) {
     [self publish:[purpose isEqual:@"end"] ? @"ending_tether" : @"quitting_tether" zh:@"" en:@""];
 }
 - (void)launchTether { ++self.launchRequests; }
+- (NSDictionary *)captureDiagnosticEvidenceAtRoot:(NSURL *)root tether:(NSDictionary *)tether service:(NSDictionary *)service {
+    (void)tether; (void)service;
+    ++self.diagnosticCaptures;
+    return @{@"status":@"partial",@"directory":root};
+}
 - (void)emitProductionSnapshot { [super publish:@"fixture_snapshot" zh:@"" en:@""]; }
 @end
 
@@ -127,6 +133,60 @@ static NSArray<NSDictionary *> *EventsNamed(GuardianFixtureController *fixture,N
     NSMutableArray *found=[NSMutableArray array];
     for(NSDictionary *entry in fixture.events) if([entry[@"event"] isEqual:name]) [found addObject:entry[@"fields"]];
     return found;
+}
+
+static void CheckDiagnosticHold(NSDictionary *ready, NSDictionary *identity) {
+    GuardianFixtureController *fixture=Fixture(identity);
+    fixture.fakePresent=YES;
+    fixture.diagnosticQueue=dispatch_queue_create("guardian.test.diagnostic",DISPATCH_QUEUE_SERIAL);
+    fixture.logDirectory=NSTemporaryDirectory();
+    NSURL *folder=[NSURL fileURLWithPath:fixture.logDirectory isDirectory:YES];
+    dispatch_sync(fixture.queue,^{
+        [fixture tetherAbsent];
+        fixture.devicePresent=YES; fixture.interfaceID=99;
+        fixture.inspectionObservationValid=YES; fixture.inspectionObservedAt=GuardianNow();
+        fixture.quitRequested=YES;
+        Check(![fixture canBeginDiagnostic],"Diagnostic cannot arm over a pending normal quit");
+    });
+    [fixture beginHighResolutionDiagnosticAtDirectory:folder]; Drain(fixture);
+    Check(!fixture.diagnosticState && fixture.quitRequested,"Refused diagnostic leaves an existing quit request intact");
+
+    dispatch_sync(fixture.queue,^{
+        fixture.quitRequested=NO; fixture.diagnosticAttempt=@"fixture"; fixture.diagnosticState=@"waiting";
+        fixture.diagnosticInterfaceID=99; fixture.diagnosticTetherIdentity=identity;
+        fixture.diagnosticDeadline=0;
+    });
+    [fixture start]; [fixture openTether]; [fixture reconnect]; [fixture endSession];
+    [fixture forceQuit]; [fixture forceRestart]; Drain(fixture);
+    Check(!fixture.desired && !fixture.pendingRecovery && !fixture.quitRequested && !fixture.endingSession &&
+        !fixture.normalQuitRequests && !fixture.launchRequests && !fixture.helperKinds.count,
+        "Diagnostic hold blocks all recovery, launch and quit actions in the controller");
+
+    dispatch_sync(fixture.queue,^{ [fixture pollDiagnostic:@"fixture"]; });
+    dispatch_sync(fixture.diagnosticQueue,^{}); Drain(fixture);
+    dispatch_sync(fixture.diagnosticQueue,^{}); Drain(fixture);
+    Check([fixture.diagnosticState isEqual:@"held"] && fixture.diagnosticCaptures==1 &&
+        [EventsNamed(fixture,@"diagnostic_collecting").lastObject[@"reason"] isEqual:@"raw_timeout"],
+        "An expired RAW watch captures evidence once and leaves a held scene");
+    [fixture captureHighResolutionDiagnosticNow]; Drain(fixture);
+    Check(fixture.diagnosticCaptures==1,"A held scene does not start duplicate evidence jobs");
+    [fixture endHighResolutionDiagnostic]; Drain(fixture);
+    Check(!fixture.diagnosticState && !fixture.desired && !fixture.pendingRecovery,
+        "Ending diagnostic mode never re-enables automatic recovery");
+
+    dispatch_sync(fixture.queue,^{
+        fixture.diagnosticAttempt=@"detach-fixture"; fixture.diagnosticState=@"waiting";
+        fixture.diagnosticInterfaceID=99;
+        NSMutableDictionary *absent=[ready mutableCopy];
+        absent[@"matching_usb_id_device_count"]=@0; absent[@"s1h_device_count"]=@0;
+        absent[@"s1h_interface_count"]=@0; absent[@"interface_registry_id"]=@0;
+        absent[@"device_model_state"]=@"unknown";
+        [fixture receiveInspection:absent status:0 expired:NO];
+    });
+    dispatch_sync(fixture.diagnosticQueue,^{}); Drain(fixture);
+    Check(fixture.diagnosticCaptures==2 && [fixture.diagnosticState isEqual:@"held"] && !fixture.normalQuitRequests &&
+        [EventsNamed(fixture,@"diagnostic_collecting").lastObject[@"reason"] isEqual:@"usb_changed"],
+        "USB detach while waiting captures early without requesting normal quit");
 }
 
 static void CheckObservationEvents(NSDictionary *identity) {
@@ -657,6 +717,7 @@ int main(void) {
         CheckActionAndLaunchEvents(ready,identity);
         CheckOpenRecoveryGate(ready,identity);
         CheckForeignOwnerGate(ready,identity);
+        CheckDiagnosticHold(ready,identity);
         Check(ForbiddenProcessCalls==0,"All exercised asynchronous paths remain inside fake process boundaries");
         printf("Guardian policy: %u checks, %u failures; production pure functions and fake asynchronous End paths; no hardware, app launch, real process enumeration or signals.\n", Checks, Failures);
         return Failures ? 1 : 0;

@@ -8,9 +8,8 @@ PATH_ARGUMENT_SET=0
 die() { print -u2 -r -- "Self-check failed: $*"; exit 1; }
 while (( $# )); do
     case "$1" in
-        --public-only) shift ;; # Retained as a harmless spelling: all CLI builds are public-only.
         -h|--help)
-            print -r -- 'Usage: scripts/self-check.sh [--public-only] [RELEASE_DIRECTORY]'
+            print -r -- 'Usage: scripts/self-check.sh [RELEASE_DIRECTORY]'
             exit 0 ;;
         --*) die "Unknown argument: $1" ;;
         *)
@@ -20,7 +19,7 @@ while (( $# )); do
 done
 [[ -d "$RELEASE_PATH" ]] || die "Missing release directory: ${RELEASE_PATH}"
 typeset -a ALLOWED_FILES
-ALLOWED_FILES=(bin/s1h_iousbhost_probe bin/s1h_camera_service 恢复S1H连接.command 'Restore S1H Connection.command'
+ALLOWED_FILES=(bin/s1h_iousbhost_probe bin/s1h_camera_service VERSION 恢复S1H连接.command 'Restore S1H Connection.command'
                重启相机服务并恢复连接.command 'Restart Camera Service and Restore.command'
                README.md README.zh-CN.md LICENSE CONTRIBUTING.md docs/TECHNICAL.md assets/alipay-donate.jpg)
 for item_path in "${RELEASE_PATH}"/**/*(DN); do
@@ -35,7 +34,7 @@ for item_path in "${RELEASE_PATH}"/**/*(DN); do
         (( ${ALLOWED_FILES[(Ie)$relative_path]} != 0 )) || die "Unexpected release file: ${relative_path}"
     fi
 done
-for required_file in bin/s1h_iousbhost_probe bin/s1h_camera_service 恢复S1H连接.command 'Restore S1H Connection.command' 重启相机服务并恢复连接.command 'Restart Camera Service and Restore.command' README.md README.zh-CN.md LICENSE; do
+for required_file in bin/s1h_iousbhost_probe bin/s1h_camera_service VERSION 恢复S1H连接.command 'Restore S1H Connection.command' 重启相机服务并恢复连接.command 'Restart Camera Service and Restore.command' README.md README.zh-CN.md LICENSE; do
     [[ -f "${RELEASE_PATH}/${required_file}" ]] || die "Missing ${required_file}."
 done
 for helper_name in s1h_iousbhost_probe s1h_camera_service; do

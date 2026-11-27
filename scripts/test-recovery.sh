@@ -73,14 +73,6 @@ cat > "${MOCK_TOOLS_DIR}/codesign" <<'MOCK'
 #!/bin/zsh
 [[ "$*" == *"$MOCK_APP"* ]]
 MOCK
-cat > "${MOCK_TOOLS_DIR}/pgrep" <<'MOCK'
-#!/bin/zsh
-if [[ -n "$MOCK_RUNNING_APP" && "${argv[-1]}" == "$MOCK_RUNNING_APP" ]]; then
-    print 424242
-    exit 0
-fi
-exit 1
-MOCK
 cat > "${MOCK_TOOLS_DIR}/open" <<'MOCK'
 #!/bin/zsh
 print -r -- "open $*" >> "$MOCK_EVENT_LOG"
@@ -101,7 +93,13 @@ cat > "${FIXTURE_DIR}/bin/s1h_camera_service" <<'MOCK'
 #!/bin/zsh
 print -r -- "service $*" >> "$MOCK_EVENT_LOG"
 case "$*" in
-    --inspect) exit "$MOCK_INSPECT_EXIT" ;;
+    --inspect)
+        if [[ -n "$MOCK_CAMERA_APPS" ]]; then
+            print -r -- "{\"known_camera_apps\":[{\"pid\":424242,\"name\":\"$MOCK_CAMERA_APPS\"}]}"
+        else
+            print -r -- '{"known_camera_apps":[]}'
+        fi
+        exit "$MOCK_INSPECT_EXIT" ;;
     --restart-camera-service) exit "$MOCK_GUARD_EXIT" ;;
     *) exit 98 ;;
 esac
@@ -118,7 +116,6 @@ redirect_tool /usr/bin/defaults "${MOCK_TOOLS_DIR}/defaults"
 redirect_tool /usr/sbin/sysctl "${MOCK_TOOLS_DIR}/sysctl"
 redirect_tool /usr/libexec/PlistBuddy "${MOCK_TOOLS_DIR}/PlistBuddy"
 redirect_tool /usr/bin/codesign "${MOCK_TOOLS_DIR}/codesign"
-redirect_tool /usr/bin/pgrep "${MOCK_TOOLS_DIR}/pgrep"
 redirect_tool /usr/bin/open "${MOCK_TOOLS_DIR}/open"
 for dangerous_tool in /usr/bin/killall /usr/bin/pkill /bin/launchctl /usr/bin/sudo /bin/kill; do
     redirect_tool "$dangerous_tool" "${MOCK_TOOLS_DIR}/forbidden"
@@ -139,7 +136,7 @@ COMMAND_SOURCE="${COMMAND_SOURCE//'$HOME'/$TEST_HOME_DIR}"
     "${FIXTURE_DIR}/重启相机服务并恢复连接.command"
 /bin/zsh -n "${FIXTURE_DIR}/恢复S1H连接.command"
 export MOCK_APP MOCK_EVENT_LOG MOCK_TOOLS_DIR
-export MOCK_PROBE_EXIT=0 MOCK_GUARD_EXIT=0 MOCK_INSPECT_EXIT=0 MOCK_OPEN_EXIT=0 MOCK_RUNNING_APP=''
+export MOCK_PROBE_EXIT=0 MOCK_GUARD_EXIT=0 MOCK_INSPECT_EXIT=0 MOCK_OPEN_EXIT=0 MOCK_CAMERA_APPS=''
 WITH_TETHER=1
 TEST_ENTRYPOINT="${FIXTURE_DIR}/恢复S1H连接.command"
 TEST_COUNT=0
@@ -180,38 +177,56 @@ PROBE_ACTION='probe --io-buffer --drain-input'
 RESTART_ACTION='service --restart-camera-service'
 INSPECT_ACTION='service --inspect'
 
+# The production command refuses to run without the shipped version file.
+run_case missing_version_file 1 --version
+assert_actions ''
+[[ "$(< "$LAST_OUTPUT")" == 'Version is unavailable. Extract the complete tool folder.' ]] ||
+    die 'Unexpected message for a missing version file.'
+/bin/cp "${PROJECT_ROOT}/VERSION" "${FIXTURE_DIR}/VERSION"
+EXPECTED_VERSION="$(< "${PROJECT_ROOT}/VERSION")"
+
 run_case version 0 --version
 assert_actions ''
-[[ "$(< "$LAST_OUTPUT")" == 1.0.2 ]] || die 'Unexpected command version.'
+[[ "$(< "$LAST_OUTPUT")" == "$EXPECTED_VERSION" ]] || die 'Unexpected command version.'
 run_case check 0 --check
 assert_actions ''
 run_case check_with_restart 0 --check --restart-camera-service
 assert_actions ''
+# Every recovery first asks the service helper which camera apps are running.
 run_case normal_success 0
-assert_actions "${PROBE_ACTION}"$'\n'"${OPEN_ACTION}"
+assert_actions "${INSPECT_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${OPEN_ACTION}"
 run_case explicit_restart_success 0 --restart-camera-service
-assert_actions "${RESTART_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${OPEN_ACTION}"
+assert_actions "${INSPECT_ACTION}"$'\n'"${RESTART_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${OPEN_ACTION}"
 TEST_ENTRYPOINT="${FIXTURE_DIR}/重启相机服务并恢复连接.command"
 run_case restart_wrapper 0
-assert_actions "${RESTART_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${OPEN_ACTION}"
+assert_actions "${INSPECT_ACTION}"$'\n'"${RESTART_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${OPEN_ACTION}"
 TEST_ENTRYPOINT="${FIXTURE_DIR}/恢复S1H连接.command"
+# The helper's camera-app list is the only source; no separate process check.
+MOCK_CAMERA_APPS='Capture One 23'
+run_case camera_app_running 1
+assert_actions "$INSPECT_ACTION"
+[[ "$(< "$LAST_OUTPUT")" == *'Quit Capture One 23 normally'* ]] || die 'The blocking app is not named.'
+MOCK_CAMERA_APPS='LUMIX Tether'
+run_case tether_already_running 1
+assert_actions "$INSPECT_ACTION"
+MOCK_CAMERA_APPS=''
+MOCK_INSPECT_EXIT=1
+run_case inspection_unavailable 1 --restart-camera-service
+assert_actions "$INSPECT_ACTION"
+MOCK_INSPECT_EXIT=0
 MOCK_GUARD_EXIT=12
 run_case guard_refuses 1 --restart-camera-service
-assert_actions "$RESTART_ACTION"
+assert_actions "${INSPECT_ACTION}"$'\n'"$RESTART_ACTION"
 MOCK_GUARD_EXIT=0
 MOCK_PROBE_EXIT=22
 run_case usb_open_failure 1
-assert_actions "${PROBE_ACTION}"$'\n'"${INSPECT_ACTION}"
+assert_actions "${INSPECT_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${INSPECT_ACTION}"
 MOCK_PROBE_EXIT=23
 run_case usb_drain_failure 1
-assert_actions "${PROBE_ACTION}"$'\n'"${INSPECT_ACTION}"
+assert_actions "${INSPECT_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${INSPECT_ACTION}"
 run_case usb_failure_after_restart 1 --restart-camera-service
-assert_actions "${RESTART_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${INSPECT_ACTION}"
+assert_actions "${INSPECT_ACTION}"$'\n'"${RESTART_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${INSPECT_ACTION}"
 MOCK_PROBE_EXIT=0
-MOCK_RUNNING_APP='LUMIX Tether'
-run_case tether_already_running 1
-assert_actions ''
-MOCK_RUNNING_APP=''
 WITH_TETHER=0
 run_case diagnose_without_tether 0 --diagnose
 assert_actions "$INSPECT_ACTION"
@@ -220,7 +235,7 @@ run_case incompatible_modes 2 --diagnose --restart-camera-service
 assert_actions ''
 MOCK_OPEN_EXIT=14
 run_case launch_failure 1
-assert_actions "${PROBE_ACTION}"$'\n'"${OPEN_ACTION}"
+assert_actions "${INSPECT_ACTION}"$'\n'"${PROBE_ACTION}"$'\n'"${OPEN_ACTION}"
 MOCK_OPEN_EXIT=0
 print -r -- "Isolated command routing: ${TEST_COUNT} cases passed."
 
