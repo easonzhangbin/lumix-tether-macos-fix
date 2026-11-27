@@ -2,18 +2,18 @@
 
 [English](README.md)
 
-## S1H Native Tether 0.1.15
+## S1H Native Tether 0.1.16
 
 **面向 Apple 芯片 Mac 和松下 DC-S1H 的独立 USB 联机拍摄工具。**
 
 这个项目起于一台 DC-S1H 在较新的 macOS 测试环境里难以连上原厂 LUMIX Tether。我们希望继续用这台相机做棚拍，因此用原生 AppKit 界面和 USB／PTP 通信进程，提供取景、遥控快门和原片传输。应用可独立运行。 [松下公布的兼容信息与下载](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)
 
-[下载 Native Tether 0.1.15（Apple 芯片 PKG）](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.15/S1H-Native-Tether-0.1.15-arm64.pkg) · [发布说明与 SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.15) · [安装与源码](experiments/native-tether/README.zh-CN.md)
+[下载 Native Tether 0.1.16（Apple 芯片 PKG）](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.16/S1H-Native-Tether-0.1.16-arm64.pkg) · [发布说明与 SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.16) · [安装与源码](experiments/native-tether/README.zh-CN.md)
 
 - 取景支持 100% 实际像素和 200% 放大。机身设为 MF 后，可单步向前或向后调整支持电子对焦的镜头。
 - 支持软件及机身快门、RAW 传输进度、自选保存目录和文件名前缀自动编号。
 - 显示 USB 协商速率、相机报告的电量及本地 PTP 接口报告。
-- 以红字显示已确认的接口占用者。若当前用户的 macOS 相机服务占用 S1H，可通过**取景与诊断 → 解除系统相机占用…**检查并恢复连接。 [恢复连接指南](experiments/native-tether/README.zh-CN.md#恢复连接)
+- 每次启动尝试连接。**断线后重试**默认开启，核实当前用户的 macOS 相机服务占用接口后，每次中断最多自动释放一次。点击**停止**或退出可结束本次尝试。 [恢复连接指南](experiments/native-tether/README.zh-CN.md#恢复连接)
 
 构建目标为 Apple 芯片及 macOS 12 或更高版本。实机测试使用 DC-S1H 和运行 macOS 27.0.1 的 Apple M1 Max Mac，已验证 1600 × 1072 实时取景、镜头双向调焦，以及同一会话连续两张 12000 × 8000 RW2 的保存与完整解码。
 

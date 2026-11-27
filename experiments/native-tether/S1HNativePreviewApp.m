@@ -125,6 +125,20 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
     return interfaceID;
 }
 
+static NSArray<NSString *> *cameraServiceReleaseArguments(NSDictionary *snapshot, NSNumber *interfaceID) {
+    NSDictionary *owner = [snapshot[@"owner_process"] isKindOfClass:NSDictionary.class] ? snapshot[@"owner_process"] : nil;
+    id pid = owner[@"pid"];
+    id startSeconds = owner[@"start_seconds"];
+    id startMicros = owner[@"start_microseconds"];
+    if (!interfaceID || ![snapshot[@"owner_state"] isEqual:@"confirmed"] ||
+        ![owner[@"executable"] isEqual:@"/usr/libexec/ptpcamerad"] || ![pid isKindOfClass:NSNumber.class] ||
+        ![pid isEqual:snapshot[@"owner_pid"]] || [pid longLongValue] <= 1 ||
+        ![startSeconds isKindOfClass:NSNumber.class] || [startSeconds unsignedLongLongValue] == 0 ||
+        ![startMicros isKindOfClass:NSNumber.class] || [startMicros unsignedLongLongValue] >= 1000000) return nil;
+    return @[@"--release-camera-service", interfaceID.stringValue, [pid stringValue],
+        [startSeconds stringValue], [startMicros stringValue]];
+}
+
 @interface PreviewApp : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @property(nonatomic,strong) NSWindow *window;
 @property(nonatomic,strong) S1HPreviewView *previewView;
@@ -170,6 +184,7 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
 @property(nonatomic) BOOL cameraInterfaceUnavailable;
 @property(nonatomic,copy) NSString *cameraInterfaceOwner;
 @property(nonatomic,strong) NSTask *cameraServiceTask;
+@property(nonatomic) BOOL automaticReleaseAttempted;
 @property(nonatomic) NSUInteger reconnectDelay;
 @property(nonatomic) BOOL workerStopRequested;
 @property(nonatomic) BOOL desiredRunning;
@@ -247,6 +262,7 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
         return [self text:@"请确认只连接一台处于 PC(Tether) 模式的 S1H，然后重新检查。"
             english:@"Connect one S1H in PC(Tether) mode, then check again."];
     if ([reason isEqual:@"owner_executable_mismatch"] || [reason isEqual:@"unknown_interface_owner"] ||
+        [reason isEqual:@"expected_owner_changed"] ||
         [reason isEqual:@"ownership_or_process_identity_changed"])
         return [self text:@"占用者与可恢复的系统相机服务不匹配。请关闭其他相机软件后重试。"
             english:@"The owner does not match the recoverable system camera service. Quit other camera apps and retry."];
@@ -263,46 +279,89 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
     task.arguments = arguments;
     if (helper) task.executableURL = [NSURL fileURLWithPath:helper];
     if (!helper || ![task launchAndReturnError:nil]) {
-        self.stateLabel.stringValue = [self text:@"无法启动相机接口检查工具。" english:@"Could not start the camera interface helper."];
+        completion(nil, NO);
         return;
     }
     self.cameraServiceTask = task;
     [self setConnectButtonEnabled:NO];
-    self.stopButton.enabled = NO;
+    self.stopButton.enabled = YES;
     self.reconnectBox.enabled = NO;
-    self.metricsLabel.stringValue = @"—";
-    self.metricsLabel.toolTip = nil;
-    self.metricsLabel.textColor = NSColor.secondaryLabelColor;
+    NSUInteger generation = self.generation;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSData *data = [output.fileHandleForReading readDataToEndOfFileAndReturnError:nil];
         [task waitUntilExit];
         id result = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
         BOOL success = task.terminationReason == NSTaskTerminationReasonExit && task.terminationStatus == 0;
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.cameraServiceTask != task) return;
             self.cameraServiceTask = nil;
             if (self.terminating) { [NSApp replyToApplicationShouldTerminate:YES]; return; }
             [self setConnectButtonEnabled:YES];
+            self.stopButton.enabled = NO;
             self.reconnectBox.enabled = YES;
-            completion([result isKindOfClass:NSDictionary.class] ? result : nil, success);
+            if (self.generation == generation)
+                completion([result isKindOfClass:NSDictionary.class] ? result : nil, success);
+            else
+                self.stateLabel.stringValue = [self text:@"已停止。" english:@"Stopped."];
         });
     });
 }
 - (void)checkCameraService:(id)sender {
     (void)sender;
+    [self inspectCameraServiceAutomatically:NO];
+}
+- (void)cameraServiceDidFail:(NSDictionary *)snapshot reason:(id)reason automatic:(BOOL)automatic {
+    NSString *message = [self cameraServiceFailure:snapshot reason:reason];
+    if (automatic) [self scheduleReconnectWithReason:message];
+    else self.stateLabel.stringValue = message;
+}
+- (void)resumeAfterCameraServiceCheckAutomatically:(BOOL)automatic {
+    if (automatic) [self launchWorkerClosingStaleSession:NO];
+    else [self startConnectionClosingStaleSession:NO];
+}
+- (void)releaseCameraService:(NSArray<NSString *> *)arguments
+                 interfaceID:(NSNumber *)interfaceID
+                   automatic:(BOOL)automatic {
+    if (automatic) self.automaticReleaseAttempted = YES;
+    self.stateLabel.stringValue = [self text:@"正在释放系统相机接口……" english:@"Releasing the system camera interface…"];
+    [self runCameraService:arguments completion:^(NSDictionary *result, BOOL success) {
+        NSDictionary *fresh = [result[@"inspection"] isKindOfClass:NSDictionary.class] ? result[@"inspection"] : nil;
+        id outcome = result[@"status"];
+        NSLog(@"S1H camera interface recovery (%@): %@, %@, signals %@",
+            automatic ? @"automatic" : @"manual", outcome ?: @"no result", result[@"reason"] ?: @"none",
+            result[@"signals_sent"] ?: @[]);
+        if (success && ([outcome isEqual:@"released"] || [outcome isEqual:@"not_needed"]) &&
+            [cameraServiceInterfaceID(fresh) isEqual:interfaceID] && [fresh[@"owner_state"] isEqual:@"none"]) {
+            [self resumeAfterCameraServiceCheckAutomatically:automatic];
+            return;
+        }
+        [self cameraServiceDidFail:fresh reason:result[@"reason"] automatic:automatic];
+    }];
+}
+- (void)inspectCameraServiceAutomatically:(BOOL)automatic {
     if (![self canCheckCameraService] || self.window.attachedSheet) return;
-    self.desiredRunning = NO;
+    if (!automatic) self.desiredRunning = NO;
     self.generation += 1;
-    self.stopButton.enabled = NO;
     self.stateLabel.stringValue = [self text:@"正在检查相机接口占用……" english:@"Checking camera interface ownership…"];
     [self runCameraService:@[@"--inspect"] completion:^(NSDictionary *snapshot, BOOL success) {
         NSNumber *interfaceID = cameraServiceInterfaceID(snapshot);
         id guard = snapshot[@"restart_guard"];
         if (success && interfaceID && [guard isEqual:@"no_owner"] && [snapshot[@"owner_state"] isEqual:@"none"]) {
-            [self startConnectionClosingStaleSession:NO];
+            if (automatic) [self scheduleReconnectWithReason:nil];
+            else [self startConnectionClosingStaleSession:NO];
             return;
         }
         if (!success || !interfaceID || ![guard isEqual:@"opt_in_required"]) {
-            self.stateLabel.stringValue = [self cameraServiceFailure:snapshot reason:guard];
+            [self cameraServiceDidFail:snapshot reason:guard automatic:automatic];
+            return;
+        }
+        NSArray<NSString *> *arguments = cameraServiceReleaseArguments(snapshot, interfaceID);
+        if (!arguments) {
+            [self cameraServiceDidFail:snapshot reason:@"inspection_error" automatic:automatic];
+            return;
+        }
+        if (automatic) {
+            [self releaseCameraService:arguments interfaceID:interfaceID automatic:YES];
             return;
         }
         // The service helper rechecks this exact USB interface and the owning process before sending any signal.
@@ -318,18 +377,7 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
         [confirmation addButtonWithTitle:[self text:@"释放并连接" english:@"Release and Connect"]];
         [confirmation beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
             if (response != NSAlertSecondButtonReturn || ![self canCheckCameraService]) return;
-            self.stateLabel.stringValue = [self text:@"正在释放系统相机接口……" english:@"Releasing the system camera interface…"];
-            [self runCameraService:@[@"--release-camera-service", interfaceID.stringValue]
-                completion:^(NSDictionary *result, BOOL released) {
-                    NSDictionary *fresh = [result[@"inspection"] isKindOfClass:NSDictionary.class] ? result[@"inspection"] : nil;
-                    id outcome = result[@"status"];
-                    if (released && ([outcome isEqual:@"released"] || [outcome isEqual:@"not_needed"]) &&
-                        [cameraServiceInterfaceID(fresh) isEqual:interfaceID] && [fresh[@"owner_state"] isEqual:@"none"]) {
-                        [self startConnectionClosingStaleSession:NO];
-                        return;
-                    }
-                    self.stateLabel.stringValue = [self cameraServiceFailure:fresh reason:result[@"reason"]];
-                }];
+            [self releaseCameraService:arguments interfaceID:interfaceID automatic:NO];
         }];
     }];
 }
@@ -519,6 +567,7 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
     self.previewTimer = [NSTimer timerWithTimeInterval:1.0 / 60.0 target:self selector:@selector(refreshPreview:) userInfo:nil repeats:YES];
     [NSRunLoop.mainRunLoop addTimer:self.timer forMode:NSRunLoopCommonModes];
     [NSRunLoop.mainRunLoop addTimer:self.previewTimer forMode:NSRunLoopCommonModes];
+    [self startConnectionClosingStaleSession:NO];
 }
 - (void)start:(id)sender {
     (void)sender;
@@ -543,6 +592,7 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
     if (self.worker || self.cameraServiceTask || self.pendingAction || self.terminating) return;
     if (self.requiresReview) [self.controlPanel setResultMessage:nil];
     self.requiresReview = NO;
+    self.automaticReleaseAttempted = NO;
     self.reconnectDelay = 0;
     self.stateLabel.textColor = NSColor.labelColor;
     self.desiredRunning = YES;
@@ -592,6 +642,7 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
         return;
     }
     self.stateLabel.stringValue = [self text:@"正在连接 S1H……" english:@"Connecting to the S1H…"];
+    self.stateLabel.toolTip = nil;
     self.outputURL = [[self workerSessionsDirectory] URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
     NSError *directoryError = nil;
     if (![NSFileManager.defaultManager createDirectoryAtURL:self.outputURL withIntermediateDirectories:YES attributes:nil error:&directoryError]) {
@@ -745,14 +796,25 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
         self.metricsLabel.toolTip = self.workerFailureMessage;
         self.metricsLabel.textColor = self.cameraInterfaceOwner.length ? NSColor.systemRedColor : NSColor.secondaryLabelColor;
     }
+    if (!self.automaticReleaseAttempted && self.reconnectBox.state == NSControlStateValueOn &&
+        [self.cameraInterfaceOwner isEqualToString:@"ptpcamerad"] && [self canCheckCameraService] && !self.window.attachedSheet) {
+        [self inspectCameraServiceAutomatically:YES];
+        return;
+    }
+    [self scheduleReconnectWithReason:nil];
+}
+- (void)scheduleReconnectWithReason:(NSString *)reason {
+    if (!self.desiredRunning || self.terminating) return;
     if (self.reconnectBox.state != NSControlStateValueOn) {
         self.desiredRunning = NO;
         self.stateLabel.stringValue = [self text:@"连接已结束，可再次点击“连接”。" english:@"The connection ended. Click Connect to try again."];
         return;
     }
     self.reconnectDelay = self.reconnectDelay ? MIN(self.reconnectDelay * 2, ConnectionRetryMaximumDelay) : ConnectionRetryInitialDelay;
-    NSString *waiting = [self text:@"等待相机，%lu 秒后重试。" english:@"Waiting for the camera. Retrying in %lu seconds."];
-    self.stateLabel.stringValue = [NSString stringWithFormat:waiting, (unsigned long)self.reconnectDelay];
+    NSString *format = [self text:@"等待相机，%lu 秒后重试。" english:@"Waiting for the camera. Retrying in %lu seconds."];
+    NSString *waiting = [NSString stringWithFormat:format, (unsigned long)self.reconnectDelay];
+    self.stateLabel.stringValue = reason.length ? [NSString stringWithFormat:@"%@ %@", reason, waiting] : waiting;
+    self.stateLabel.toolTip = reason;
     self.stopButton.enabled = YES;
     NSUInteger generation = self.generation;
     __weak PreviewApp *weakSelf = self;
@@ -781,6 +843,13 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
     [self.controlPanel setCaptureAvailable:NO];
     [self.controlPanel setBusy:self.pendingAction != nil || [self cameraTransferInProgress]];
     self.generation += 1;
+    NSTask *serviceTask = self.cameraServiceTask;
+    if (serviceTask) {
+        self.stopButton.enabled = NO;
+        self.stateLabel.stringValue = [self text:@"正在停止接口恢复……" english:@"Stopping interface recovery…"];
+        if (serviceTask.running) [serviceTask terminate];
+        return;
+    }
     NSTask *task = self.worker;
     if (!task) {
         [self setConnectButtonEnabled:YES];
@@ -1197,8 +1266,11 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
     if (transfer) [self showCameraTransferStatus:transfer previousDirectory:previousDirectory];
     [self updateCaptureProgressForAction:action transfer:transfer];
     self.cameraReady = self.desiredRunning && !self.requiresReview && [state isEqualToString:@"previewing"];
-    if (self.reconnectDelay && self.cameraReady && [status[@"frames"] isKindOfClass:NSNumber.class] &&
-        [status[@"frames"] unsignedIntegerValue] > 0) self.reconnectDelay = 0;
+    if (self.cameraReady && [status[@"frames"] isKindOfClass:NSNumber.class] &&
+        [status[@"frames"] unsignedIntegerValue] > 0) {
+        self.reconnectDelay = 0;
+        self.automaticReleaseAttempted = NO;
+    }
     self.captureAvailable = [status[@"capture_available"] isEqual:@YES];
     [self.controlPanel setCameraReady:self.cameraReady];
     [self.controlPanel setCaptureAvailable:self.cameraReady && self.captureAvailable];
@@ -1295,11 +1367,7 @@ static NSNumber *cameraServiceInterfaceID(NSDictionary *snapshot) {
 }
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
     (void)sender;
-    if (self.cameraServiceTask) {
-        self.terminating = YES;
-        return NSTerminateLater;
-    }
-    if (!self.worker) return NSTerminateNow;
+    if (!self.worker && !self.cameraServiceTask) return NSTerminateNow;
     self.terminating = YES;
     [self stop:nil];
     return NSTerminateLater;

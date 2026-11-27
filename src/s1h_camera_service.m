@@ -359,7 +359,7 @@ static NSArray<NSString *> *known_camera_names(void) {
     dispatch_once(&once, ^{
         names = @[@"lumix tether", @"preview", @"image capture", @"photos",
                  @"capture one", @"adobe lightroom classic", @"gphoto2", @"ptpcam", @"ptpcamera",
-                 @"s1h_ptp_probe", @"s1h_iousbhost_probe"];
+                 @"negpy", @"negpy apple silicon", @"s1h_ptp_probe", @"s1h_iousbhost_probe"];
     });
     return names;
 }
@@ -486,11 +486,14 @@ static BOOL expected_shutdown_pending(ServiceSnapshot *s, ServiceIdentity *expec
  * signal. There is no Darwin pidfd API here; this minimizes, but cannot make
  * atomic, the final proc_pidinfo-to-kill interval. Explicit opt-in remains
  * mandatory and the caller must keep all camera applications closed. */
-static NSDictionary *recover_service(id<ServiceEnvironment> environment, uint64_t expectedInterfaceID) {
+static NSDictionary *recover_service(id<ServiceEnvironment> environment, uint64_t expectedInterfaceID,
+                                     ServiceIdentity *observedOwner) {
     ServiceSnapshot *initial = [environment inspect];
     NSString *reason = expected_interface_guard(initial, expectedInterfaceID);
     if ([reason isEqualToString:@"no_owner"]) return result(@"not_needed", reason, initial, @[]);
     if (![reason isEqualToString:@"opt_in_required"]) return result(@"refused", reason, initial, @[]);
+    if (observedOwner && ![initial.owner isSameProcess:observedOwner])
+        return result(@"refused", @"expected_owner_changed", initial, @[]);
     ServiceIdentity *expected = initial.owner;
     uint64_t interfaceID = initial.interfaceID;
     NSMutableArray<NSString *> *signals = [NSMutableArray array];
@@ -540,10 +543,10 @@ static NSDictionary *recover_service(id<ServiceEnvironment> environment, uint64_
 }
 
 static NSDictionary *restart_service(id<ServiceEnvironment> environment) {
-    return recover_service(environment, 0);
+    return recover_service(environment, 0, nil);
 }
 
-static BOOL parse_interface_id(const char *text, uint64_t *value) {
+static BOOL parse_decimal_u64(const char *text, uint64_t *value) {
     uint64_t parsed = 0;
     if (!text || !*text) return NO;
     for (const unsigned char *byte = (const unsigned char *)text; *byte; ++byte) {
@@ -552,9 +555,28 @@ static BOOL parse_interface_id(const char *text, uint64_t *value) {
         if (parsed > (UINT64_MAX - digit) / 10) return NO;
         parsed = parsed * 10 + digit;
     }
-    if (!parsed) return NO;
     *value = parsed;
     return YES;
+}
+
+static BOOL parse_interface_id(const char *text, uint64_t *value) {
+    return parse_decimal_u64(text, value) && *value > 0;
+}
+
+static ServiceIdentity *parse_observed_owner(const char *pidText, const char *secondsText,
+                                              const char *microsecondsText, uid_t uid) {
+    uint64_t pid = 0, seconds = 0, microseconds = 0;
+    if (!parse_decimal_u64(pidText, &pid) || pid <= 1 || pid > INT_MAX ||
+        !parse_decimal_u64(secondsText, &seconds) || seconds == 0 ||
+        !parse_decimal_u64(microsecondsText, &microseconds) || microseconds >= 1000000) return nil;
+    ServiceIdentity *owner = [ServiceIdentity new];
+    owner.pid = (pid_t)pid;
+    owner.uid = uid;
+    owner.realUID = uid;
+    owner.startSeconds = seconds;
+    owner.startMicroseconds = microseconds;
+    owner.path = ServiceExecutable;
+    return owner;
 }
 
 /* All simulation below is isolated from LiveServiceEnvironment and OS APIs. */
@@ -707,7 +729,7 @@ static int self_test(void) {
           @"Normalized invalidated matching inventory refuses service restart without signals");
     FakeServiceEnvironment *e = fake_environment();
     check([guard_reason(e.snapshot) isEqualToString:@"opt_in_required"], @"Verified ownership still requires explicit opt-in");
-    for (NSString *name in @[@"LUMIX Tether", @"Preview", @"Image Capture", @"Photos", @"Capture One", @"Adobe Lightroom Classic", @"gphoto2", @"PTPCamera", @"s1h_iousbhost_probe"]) {
+    for (NSString *name in @[@"LUMIX Tether", @"Preview", @"Image Capture", @"Photos", @"Capture One", @"Adobe Lightroom Classic", @"gphoto2", @"PTPCamera", @"NegPy", @"NegPy Apple Silicon", @"s1h_iousbhost_probe"]) {
         e = fake_environment();
         e.snapshot.knownApps = @[@{@"pid": @99999, @"name": name}];
         NSDictionary *r = restart_service(e);
@@ -808,18 +830,38 @@ static int self_test(void) {
           !parse_interface_id("777 ", &parsed) && !parse_interface_id("", &parsed),
           @"Interface binding accepts exact nonzero decimal UInt64 values without truncation");
     e = fake_environment();
-    check([recover_service(e, 778)[@"reason"] isEqual:@"expected_interface_changed"] && e.signalCount == 0,
+    check([recover_service(e, 778, nil)[@"reason"] isEqual:@"expected_interface_changed"] && e.signalCount == 0,
           @"Native release refuses a different initial interface without signals");
     e = fake_environment(); e.releaseOnSignal = SIGTERM;
-    check([recover_service(e, 777)[@"status"] isEqual:@"released"] && [e.signalNumbers isEqual:@[@(SIGTERM)]],
+    check([recover_service(e, 777, nil)[@"status"] isEqual:@"released"] && [e.signalNumbers isEqual:@[@(SIGTERM)]],
           @"Native release verifies the same interface and succeeds with TERM alone");
     e = fake_environment(); e.releaseOnSignal = SIGKILL;
-    check([recover_service(e, 777)[@"status"] isEqual:@"released"] &&
+    check([recover_service(e, 777, nil)[@"status"] isEqual:@"released"] &&
           [e.signalNumbers isEqual:@[@(SIGTERM), @(SIGKILL)]] && e.clock >= TermWait,
           @"Native release permits KILL only after TERM timeout and revalidation");
     e = fake_environment(); e.releaseOnSignal = SIGTERM; e.replaceInterfaceAfterTerm = YES;
-    check([recover_service(e, 777)[@"reason"] isEqual:@"expected_interface_changed"] &&
+    check([recover_service(e, 777, nil)[@"reason"] isEqual:@"expected_interface_changed"] &&
           [e.signalNumbers isEqual:@[@(SIGTERM)]], @"A different unowned interface is not the released camera");
+    ServiceIdentity *observedOwner = parse_observed_owner("90001", "1000", "123", 501);
+    check([observedOwner isSameProcess:fake_identity()] &&
+          parse_observed_owner("2", "18446744073709551615", "0", 501) &&
+          !parse_observed_owner("1", "1", "0", 501) && !parse_observed_owner("2147483648", "1", "0", 501) &&
+          !parse_observed_owner("2", "0", "0", 501) && !parse_observed_owner("2", "1", "1000000", 501) &&
+          !parse_observed_owner("2", "1", "-1", 501),
+          @"Observed owner requires exact decimal PID and valid process start fields");
+    e = fake_environment(); e.snapshot.owner.startMicroseconds += 1;
+    check([recover_service(e, 777, observedOwner)[@"reason"] isEqual:@"expected_owner_changed"] && e.signalCount == 0,
+          @"Native release refuses a replacement daemon that acquired the inspected interface");
+    e = fake_environment(); e.snapshot.ownerState = @"none"; e.snapshot.owner = nil;
+    check([recover_service(e, 777, observedOwner)[@"status"] isEqual:@"not_needed"] && e.signalCount == 0,
+          @"An inspected interface that is already unowned does not need a signal");
+    e = fake_environment();
+    e.snapshot.knownApps = @[@{@"pid": @88888, @"name": @"NegPy"}];
+    check([recover_service(e, 777, observedOwner)[@"reason"] isEqual:@"camera_apps_running"] && e.signalCount == 0,
+          @"Native release refuses a running camera client even with a matching observed owner");
+    e = fake_environment(); e.releaseOnSignal = SIGTERM;
+    check([recover_service(e, 777, observedOwner)[@"status"] isEqual:@"released"] && [e.signalNumbers isEqual:@[@(SIGTERM)]],
+          @"Native release accepts the exact inspected identity under the normal guard");
     printf("Self-test: %u checks, %u failures; simulated only, no process or registry access.\n", checks, failures);
     return failures ? 1 : 0;
 }
@@ -836,22 +878,30 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         BOOL restart = NO, simulate = NO;
         uint64_t releaseInterfaceID = 0;
+        ServiceIdentity *observedOwner = nil;
         if (argc == 2 && strcmp(argv[1], "--restart-camera-service") == 0) restart = YES;
-        else if (argc == 3 && strcmp(argv[1], "--release-camera-service") == 0) {
+        else if ((argc == 3 || argc == 6) && strcmp(argv[1], "--release-camera-service") == 0) {
             if (!parse_interface_id(argv[2], &releaseInterfaceID)) {
                 fprintf(stderr, "--release-camera-service requires a nonzero decimal UInt64 registry ID.\n");
                 return 2;
             }
+            if (argc == 6) {
+                observedOwner = parse_observed_owner(argv[3], argv[4], argv[5], getuid());
+                if (!observedOwner) {
+                    fprintf(stderr, "--release-camera-service requires a decimal owner PID and valid start seconds/microseconds.\n");
+                    return 2;
+                }
+            }
         }
         else if (argc == 2 && strcmp(argv[1], "--self-test") == 0) simulate = YES;
         else if (argc == 2 && strcmp(argv[1], "--help") == 0) {
-            printf("Usage: %s [--inspect | --release-camera-service INTERFACE_REGISTRY_ID | --restart-camera-service | --self-test]\n", argv[0]);
+            printf("Usage: %s [--inspect | --release-camera-service INTERFACE_REGISTRY_ID [PID START_SECONDS START_MICROSECONDS] | --restart-camera-service | --self-test]\n", argv[0]);
             printf("Default/--inspect is read-only. Restart is explicit opt-in and may interrupt this user's camera import service.\n");
             printf("--release-camera-service requires a matching S1H interface registry ID before TERM or a revalidated KILL fallback.\n");
             printf("Close ALL camera/import applications first. Actual daemon client state cannot be proven empty.\n");
             return 0;
         } else if (!(argc == 1 || (argc == 2 && strcmp(argv[1], "--inspect") == 0))) {
-            fprintf(stderr, "Usage: %s [--inspect | --release-camera-service INTERFACE_REGISTRY_ID | --restart-camera-service | --self-test]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--inspect | --release-camera-service INTERFACE_REGISTRY_ID [PID START_SECONDS START_MICROSECONDS] | --restart-camera-service | --self-test]\n", argv[0]);
             return 2;
         }
         if (simulate) return self_test();
@@ -876,7 +926,7 @@ int main(int argc, const char *argv[]) {
             print_json(output);
             return snapshot.inspectionError ? 1 : 0;
         }
-        NSDictionary *output = releaseInterfaceID ? recover_service(environment, releaseInterfaceID) : restart_service(environment);
+        NSDictionary *output = releaseInterfaceID ? recover_service(environment, releaseInterfaceID, observedOwner) : restart_service(environment);
         print_json(output);
         return [@[@"released", @"not_needed"] containsObject:output[@"status"]] ? 0 : 1;
     }

@@ -2,18 +2,18 @@
 
 [简体中文](README.zh-CN.md)
 
-## S1H Native Tether 0.1.15
+## S1H Native Tether 0.1.16
 
 **USB tethered still photography for the Panasonic DC-S1H on Apple silicon Macs.**
 
 This project started with a DC-S1H that struggled to connect to official LUMIX Tether on our newer macOS test setup. S1H Native Tether keeps that camera useful for studio work with its own AppKit interface and USB/PTP worker. It provides live view, remote shutter and original-file transfer without requiring Panasonic's app. [Panasonic’s published compatibility and downloads](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)
 
-[Download Native Tether 0.1.15 (Apple silicon PKG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.15/S1H-Native-Tether-0.1.15-arm64.pkg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.15) · [Setup and source](experiments/native-tether/README.md)
+[Download Native Tether 0.1.16 (Apple silicon PKG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.16/S1H-Native-Tether-0.1.16-arm64.pkg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.16) · [Setup and source](experiments/native-tether/README.md)
 
 - Inspect focus with 100% and 200% live-view zoom and nudge an electronically controlled lens in either direction in MF mode.
 - Capture from the software or camera shutter, follow RAW transfer progress, and put the originals into a chosen folder with optional custom numbering.
 - See USB link rate, compatible camera battery readings, and a local PTP capability report.
-- Identify a confirmed interface owner in red. If the current user's macOS camera service holds the S1H, use **View & Tools → Release System Camera Interface…** to check ownership and reconnect. [Recovery guide](experiments/native-tether/README.md#recover-a-connection)
+- Start a connection attempt every time the app opens. With **Retry after disconnect** enabled by default, the app can release the current user's verified macOS camera service once per interruption. **Stop** or Quit ends the current attempt. [Recovery guide](experiments/native-tether/README.md#recover-a-connection)
 
 The build targets Apple silicon and macOS 12 or later. The tested setup is a DC-S1H on an Apple M1 Max Mac running macOS 27.0.1. Hardware checks reached 1600 × 1072 live view, verified lens movement in both directions, and saved and fully decoded consecutive 12000 × 8000 RW2 images.
 

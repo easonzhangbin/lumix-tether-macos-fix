@@ -4,16 +4,16 @@
 
 An independent USB tethering app for still photography with the Panasonic **DC-S1H** on Apple silicon Macs. It grew out of a connection problem with official LUMIX Tether on our newer macOS test setup. Its AppKit interface and USB/PTP worker let us keep using the camera for studio work and bring originals directly into a Mac folder. [Panasonic’s published compatibility and downloads](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)
 
-[Download 0.1.15 for Apple silicon (PKG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.15/S1H-Native-Tether-0.1.15-arm64.pkg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.15)
+[Download 0.1.16 for Apple silicon (PKG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.16/S1H-Native-Tether-0.1.16-arm64.pkg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.16)
 
 ## Install and shoot
 
-1. Verify the PKG using the matching SHA-256 file from the release page. Open the PKG in Installer, then open **S1H Native Tether.app** in **Applications**. The installer is unsigned and the app is ad-hoc signed. This release is distributed without Apple notarization. If macOS blocks it, check the source and checksum before deciding whether to open it. [Apple’s safe-opening guide](https://support.apple.com/en-us/102445)
-2. Quit other camera clients such as LUMIX Tether, Image Capture, and Preview. Connect the S1H with a USB data cable, select **PC(Tether)** on the camera, and click **Connect**. Native Tether runs on its own.
+1. Verify the PKG using the matching `.pkg.sha256` from the release page and run the PKG in Installer. The installer is unsigned and the app is ad-hoc signed. This release is distributed without Apple notarization. If macOS blocks it, check the source and checksum before deciding whether to open it. [Apple’s safe-opening guide](https://support.apple.com/en-us/102445)
+2. Quit other camera clients such as LUMIX Tether, Image Capture, and Preview. Connect the S1H with a USB data cable and select **PC(Tether)** on the camera. Open **S1H Native Tether.app** in **Applications** to start a connection attempt. Use **Connect** to start another attempt after pressing **Stop**.
 3. Choose a save folder or use `~/Pictures/S1H Tether`. **Capture and Save** defaults to **Save to Mac Only**. Photos taken with the physical shutter follow the camera’s active tether storage target.
 4. Wait for transfers to finish, then click **Stop** before unplugging the camera or switching camera apps.
 
-## What 0.1.15 does
+## What 0.1.16 does
 
 - **Live view and camera settings** include Fit Window, 100% Actual Pixels, draggable 200% Zoom, a composition grid, and the camera’s available aperture, shutter speed, ISO, and white balance options.
 - **Remote Focus** provides one step per click with **Focus Forward** and **Focus Back**. Set the camera to MF and use an electronically controlled lens. If both buttons are inactive, refresh the camera settings after selecting MF.
@@ -29,11 +29,15 @@ The build targets **macOS 12 or later on Apple silicon**. The tested pairing was
 
 ## Recover a connection
 
+The app tries to connect on every launch. **Retry after disconnect** is on by default. If the current user's verified macOS camera service `ptpcamerad` exclusively owns the S1H interface, the app can attempt an automatic release once per interruption. It requests a normal quit first. If the wait expires, it can force quit only after rechecking that the same verified process still exclusively owns the same interface. The app resumes connecting after confirming release. A known camera or import app, another USB PTP camera, or an unverified owner blocks the release.
+
+**Stop** or Quit cancels the current connection and recovery attempt. Fully quit and reopen the app to start a fresh connection attempt.
+
 If **Recover** appears, the camera has reported an existing PTP session. Wait until the camera is idle and the card-access light is off, then confirm recovery. The app pauses automatic reconnect when a capture or previous session needs review.
 
 If macOS sees the S1H but the app cannot open its interface, the status line shows a confirmed exclusive owner in red. For a named camera or import app, quit it normally and try connecting again.
 
-If the current user's macOS camera service `ptpcamerad` holds the interface, choose **View & Tools → Release System Camera Interface…** to verify ownership. Wait until the camera is idle, the card-access light is off, and all imports and transfers have finished. Choose **Release and Connect** to request that the service quit. If the wait expires, a force quit is permitted only while the same verified process still owns the same S1H interface. A detected camera or import app, another USB camera, or a change in ownership stops recovery. The app reconnects after it confirms the interface is free.
+If the current user's macOS camera service `ptpcamerad` holds the interface, choose **View & Tools → Release System Camera Interface…** to verify ownership. Wait until the camera is idle, the card-access light is off, and all imports and transfers have finished. Choose **Release and Connect** to request that the service quit. The manual action uses the same checks and force-quit conditions as automatic release. The app reconnects after it confirms the interface is free.
 
 Session logs and the most recent preview frame are stored locally under `~/Library/Caches/S1H Native Preview/experimental/sessions/`. In a report, include the app version, macOS version, camera model and firmware, and the steps that led to the issue. Share excerpts with private details removed. [GitHub Issues](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues)
 
