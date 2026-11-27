@@ -2,22 +2,37 @@
 
 [简体中文](README.zh-CN.md)
 
+This project keeps the Panasonic **DC-S1H** in use for USB tethered still photography on Apple silicon Macs. It began when our S1H struggled to connect to official LUMIX Tether on a newer macOS setup. We wanted to check focus and exposure at the Mac, take a shot, and save the original straight into the shoot folder.
+
+| Tool | Shooting workflow | Download |
+| --- | --- | --- |
+| **S1H Native Tether 0.1.17** | A standalone app for live view, camera controls, shooting, photo review, and original-file transfer. | [Apple silicon PKG](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.17/S1H-Native-Tether-0.1.17-arm64.pkg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.17) |
+| **LUMIX Connection Guardian 0.2.5 beta** | A menu-bar helper for connection recovery and diagnostics when shooting in Panasonic's separately installed LUMIX Tether 2.12. | [Apple silicon DMG](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/guardian-v0.2.5/LUMIX-Connection-Guardian-0.2.5-arm64.dmg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5) |
+
 ## S1H Native Tether 0.1.17
 
-**USB tethered still photography for the Panasonic DC-S1H on Apple silicon Macs.**
+The AppKit interface and bundled USB/PTP worker connect directly to the S1H. The app runs independently of LUMIX Tether. Its interface uses Simplified Chinese for Chinese language preferences and English otherwise. The public PKG targets **Apple silicon and macOS 12 or later**. The installer is unsigned and the app uses ad-hoc signing. The release has no Apple notarization. [Installation and recovery guide](experiments/native-tether/README.md)
 
-This project started with a DC-S1H that struggled to connect to official LUMIX Tether on our newer macOS test setup. S1H Native Tether keeps that camera useful for studio work with its own AppKit interface and USB/PTP worker. It provides live view, remote shutter and original-file transfer without requiring Panasonic's app. [Panasonic’s published compatibility and downloads](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html)
+### New in 0.1.17
 
-[Download Native Tether 0.1.17 (Apple silicon PKG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/native-tether-v0.1.17/S1H-Native-Tether-0.1.17-arm64.pkg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/native-tether-v0.1.17) · [Setup and source](experiments/native-tether/README.md)
+- **Live View** switches between the camera stream and photo review. When it is off, the S1H stays connected for shooting and transfer. The latest JPEG or RW2 received by the app appears automatically, and stays visible during the next transfer.
+- **Consecutive RAW transfers from the camera shutter** now recheck photo metadata when the camera reuses a temporary handle. This fixes a case where a new photo could be skipped as a duplicate event.
 
-- Turn off **Live View** to review the latest JPEG or RW2 received by the app. The S1H stays connected and ready to shoot.
-- Inspect focus with 100% and 200% live-view zoom and nudge an electronically controlled lens in either direction in MF mode.
-- Capture from the software or camera shutter, follow RAW transfer progress, and put the originals into a chosen folder with optional custom numbering.
-- Fixed a RAW transfer issue when the camera reuses a temporary image slot after quick successive presses of the camera shutter.
-- See USB link rate, compatible camera battery readings, and a local PTP capability report.
-- Start a connection attempt every time the app opens. With **Retry after disconnect** enabled by default, the app can release the current user's verified macOS camera service once per interruption. **Stop** or Quit ends the current attempt. [Recovery guide](experiments/native-tether/README.md#recover-a-connection)
+### Shoot from the Mac
 
-The build targets Apple silicon and macOS 12 or later. On a DC-S1H connected to an Apple M1 Max Mac running macOS 27.0.1, 0.1.17 reached 1600 × 1072 live view on a 5 Gbps USB link. With live view off, three consecutive camera-shutter captures produced 6000 × 4000 RW2 files that each decoded in full. The third photo appeared automatically in review. Earlier versions verified lens movement in both directions and saved and fully decoded consecutive 12000 × 8000 RW2 images.
+- Frame with live view, a composition grid, and 100% or 200% zoom. Adjust aperture, shutter speed, ISO, and white balance using the options reported by the camera. Nudge an electronically controlled lens forward or backward in MF mode.
+- Capture with the software button or the camera shutter. Follow transfer progress, save the originals to a chosen folder, and optionally add a prefix and sequence number. The app checks RAW structure before finalizing the file.
+- See the negotiated USB link speed, battery level when reported by the camera, and a local PTP capability report. The app attempts to connect on startup. With retry enabled, it can try once per interruption to release the S1H interface after verifying that the current user's macOS camera service owns it. [Recovery details](experiments/native-tether/README.md#recover-a-connection)
+
+### Quick start
+
+1. Verify the PKG with the release's `.pkg.sha256` and run it in Installer. Quit other camera or import apps before connecting the S1H with a USB data cable. Select **PC(Tether)** on the camera.
+2. Open **S1H Native Tether.app** from **Applications**. Once connected, use **Capture and Save** to take a test shot. The default folder is `~/Pictures/S1H Tether`. To use the camera shutter, select a tether storage target that sends originals to the Mac.
+3. Turn off **Live View** to review incoming photos. Wait for transfers to finish, then click **Stop** before disconnecting USB.
+
+### Hardware checks
+
+On a **DC-S1H**, **Apple M1 Max**, and **macOS 27.0.1**, 0.1.17 delivered **1600 × 1072** live view over a negotiated **5 Gbps** USB link. With live view off, three consecutive camera-shutter captures produced **6000 × 4000 RW2** originals that each decoded in full. The third photo appeared automatically in review. Earlier builds also saved and fully decoded two consecutive **12000 × 8000** high-resolution RW2 files. [Hardware test scope](experiments/native-tether/README.md#hardware-checks-and-scope)
 
 ## LUMIX Connection Guardian
 
@@ -27,11 +42,14 @@ The build targets Apple silicon and macOS 12 or later. On a DC-S1H connected to 
 
 An independent Apple Silicon menu-bar utility that prepares the S1H USB connection, hands it to official Tether 2.12, and watches connection and application lifecycles. Panasonic's application supplies live view, shooting, aperture, shutter, ISO, white balance and original-file saving. Guardian supplies connection recovery and a clear way to finish a session.
 
-[Download Guardian 0.2.5 beta for Apple Silicon (DMG)](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/download/guardian-v0.2.5/LUMIX-Connection-Guardian-0.2.5-arm64.dmg) · [Release notes and SHA-256](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5) · [Detailed guide](experiments/connection-guardian/README.md) · [Earlier recovery scripts](docs/CLI.md)
+[Guardian installation and troubleshooting](experiments/connection-guardian/README.md) · [Earlier recovery scripts](docs/CLI.md)
 
 This is a community beta tested on one S1H setup. It is not affiliated with Panasonic or Apple. Official Tether must be installed separately; the download contains this project's own app and helpers only.
 
-## High Resolution Diagnostic in 0.2.5
+<details>
+<summary>Guardian workflows, diagnostics, and hardware test notes</summary>
+
+### High Resolution Diagnostic in 0.2.5
 
 With the S1H connected in Tether, choose **Start High Resolution Diagnostic…** from the Guardian menu and select Tether's import folder. When the diagnostic shows it is ready, take one XL shot. Guardian checks for a new structurally complete 12000×8000 DC-S1H RW2 in the folder or its immediate date subfolders.
 
@@ -39,23 +57,23 @@ If no complete file arrives within 30 seconds of readiness, Guardian saves avail
 
 The diagnostic preserves evidence. The intermittent high-resolution RAW transfer stall remains unresolved. Earlier five-second USB hot-plug tests required a battery power reset, and 0.2.5 has not repeated those tests. [Detailed diagnostic steps](experiments/connection-guardian/README.md#high-resolution-diagnostic)
 
-## External interface ownership
+### External interface ownership
 
 A fresh, confirmed third-party interface owner now produces a red warning: for example, **“Interface owned by NegPy; disconnect there or quit normally.”** Unknown or expired evidence clears the name and red warning. A known camera app detected as running is a separate conservative recovery blocker, not proof of ownership. The normal macOS `ptpcamerad` service is distinguished from third-party software and is eligible only for guarded service recovery. Guardian never closes other camera apps automatically.
 
 Pending preparation waits for blockers to clear without spending its I/O retry budget. If Tether is still running, releasing another app does not trigger USB work: use **Reconnect** when a normal Tether restart is needed.
 
-### Earlier 0.2.3 correction
+#### Earlier 0.2.3 correction
 
 Fixes an inspection error when macOS successfully reports no matching USB services with a NULL iterator. Actual API errors and invalid non-NULL iterators still stop recovery; recursive registry checks are unchanged. This fixes empty-device detection, not the unexplained camera lockup described below.
 
 This beta cannot prepare a connection while the S1H is absent from USB enumeration.
 
-### Earlier 0.2.2 correction
+#### Earlier 0.2.2 correction
 
 The pre-recovery check now names other camera clients that must quit normally, including Preview. A detected application is a conservative blocker, not proof that it owns the camera; actual interface ownership is shown separately. All Guardian launch entries check and prepare the connection while Tether is absent. Blocked and unblocked recovery states are logged.
 
-## What it does
+### What it does
 
 | Action | Behavior |
 | --- | --- |
@@ -68,7 +86,7 @@ The pre-recovery check now names other camera clients that must quit normally, i
 
 A physical disconnect may request normal quit of the exact verified Tether instance Guardian launched. Recovery retries are bounded. Unknown ownership or other camera software can block service recovery. Guardian cannot reserve USB globally while allowing Tether to use it, or repair every internal Tether hang.
 
-## How it works
+### How it works
 
 1. Inspect USB, registered interface ownership and running camera apps read-only, using fresh observations.
 2. Wait if a confirmed external owner or another detected camera client blocks preparation. A red warning is a request for you to disconnect or quit that software normally.
@@ -77,7 +95,7 @@ A physical disconnect may request normal quit of the exact verified Tether insta
 5. Recheck camera identity, processes and ownership before launch. A newly detected blocker preserves pending preparation rather than bypassing checks.
 6. Open the separately installed, unmodified official Tether. Select the camera, Start and LV there; Panasonic's app performs actual preview, capture, parameter control and saving.
 
-## Install and use
+### Install and use
 
 1. Install **official LUMIX Tether 2.12** from [Panasonic](https://av.jpn.support.panasonic.com/support/global/cs/soft/download/d_lumixtether.html), in `/Applications` or `~/Applications`.
 2. Open the Guardian beta DMG and drag **LUMIX Connection Guardian.app** to the Applications shortcut. [Guardian 0.2.5 release downloads](https://github.com/easonzhangbin/lumix-tether-macos-fix/releases/tag/guardian-v0.2.5)
@@ -89,7 +107,7 @@ Guardian starts idle and does not install a login item or persistent system serv
 
 The app is locally ad-hoc signed and **not Developer ID notarized**. Another Mac may block a downloaded copy. Review its source and origin and follow [Apple's safe-opening instructions](https://support.apple.com/en-us/102445). The tool does not disable system protections. macOS may separately request accessory or removable-volume permission for the app being used.
 
-## Troubleshooting order
+### Troubleshooting order
 
 1. **Stop capture and wait for file transfer to finish.** Keep the USB data cable connected, the camera powered on and **PC(Tether)** selected. Check Guardian’s status.
 2. **Quit applications named by Recovery Check normally.** Save pending edits first, then quit Preview, Image Capture or another listed camera client. A running application is not proof that it owns the camera.
@@ -100,7 +118,7 @@ The app is locally ad-hoc signed and **not Developer ID notarized**. Another Mac
 
 Recommended shutdown order: **finish transfer → End This Shoot → confirm Tether exited → disconnect USB.** This order has not been hardware-retested in this round. The five-second unplug/reconnect during live view failed on the tested setup; automatic recovery is not guaranteed.
 
-## Verified, and still unverified
+### Verified, and still unverified
 
 | Item | Observed result |
 | --- | --- |
@@ -123,7 +141,7 @@ The tested five-second hot-plug failed. More hot-plug scenarios, sleep/wake, lon
 
 **5 Gbps is the negotiated link mode, not live MB/s.** This passive monitor does not obtain reliable per-camera throughput counters on the tested setup. It does not substitute file-write speed or an unmeasured zero for USB throughput.
 
-## Local event logs
+### Local event logs
 
 `~/Library/Logs/S1H Connection Guardian/events.jsonl` records timestamps, run/attempt IDs, actions and outcomes. It rotates at 1 MiB per file with three archives. Use **Show Diagnostics and Logs Folder** to find it.
 
@@ -131,7 +149,7 @@ A Guardian-issued launch request and the application returned by macOS are recor
 
 Event fields exclude camera serials, photographs, full paths and raw inspection objects. Separate helper logs include process metadata; review any excerpt before sharing. Nothing is automatically uploaded.
 
-## Build
+### Build
 
 Use Xcode Command Line Tools on an Apple Silicon Mac:
 
@@ -143,6 +161,10 @@ Use Xcode Command Line Tools on an Apple Silicon Mac:
 Builds and self-tests do not open the camera or launch Tether. For iCloud-synchronized source folders, use the output-directory option in the [detailed guide](experiments/connection-guardian/README.md) to avoid file-provider metadata affecting strict app signatures.
 
 The earlier `.command` tools remain available as source. The current Guardian release supplies the DMG and its SHA-256 file. CI validates builds. [CLI build and usage guide](docs/CLI.md) · [Technical evidence and limits](docs/TECHNICAL.md) · [Contributing](CONTRIBUTING.md) · [Bug reports](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues/new?template=bug_report.yml)
+
+</details>
+
+[Report an issue](https://github.com/easonzhangbin/lumix-tether-macos-fix/issues) · [Contributing](CONTRIBUTING.md)
 
 ## Support development
 
